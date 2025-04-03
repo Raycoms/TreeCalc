@@ -93,7 +93,7 @@ fn calculate_cost(m: f64) {
     for i in 1..depth + 1 {
         // At the top of the tree, as we don't have a perfectly balanced tree, fanout might be smaller (this is good actually as it reduces leader load)
         let actual_fanout = m.min(nodes_left);
-        tree_comp += (actual_fanout * VERIFYING_COST + actual_fanout * AGG_SIG_COST * DUP_FACTOR + N.min(m * m1.powi(i)) * AGG_PUB_COST * DUP_FACTOR) / C;
+        tree_comp += (actual_fanout * 16 * VERIFYING_COST + actual_fanout * AGG_SIG_COST * DUP_FACTOR + N.min(m * m1.powi(i)) * AGG_PUB_COST * DUP_FACTOR) / C;
         //println!("{} {}", i, N.min(m*m1.powi(i)));
         nodes_left = nodes_left / m;
     }
@@ -133,7 +133,7 @@ fn calculate_cost_variable(m: f64, reduction_factor: f64) {
     let mut current_nodes = 1.0;
 
     loop {
-        tree_comp += (variable_fanout * VERIFYING_COST + variable_fanout * AGG_SIG_COST * DUP_FACTOR + current_lower_nodes * AGG_PUB_COST * DUP_FACTOR) / C;
+        tree_comp += (variable_fanout * 16 * VERIFYING_COST + variable_fanout * AGG_SIG_COST * DUP_FACTOR + current_lower_nodes * AGG_PUB_COST * DUP_FACTOR) / C;
         current_lower_nodes = N/variable_fanout;
         variable_fanout = variable_fanout * 2.0;
         current_nodes = current_nodes * variable_fanout;
