@@ -9,3 +9,11 @@ rand = "0.8"
 rand_core = "0.6.0"
 rand_chacha = "0.3.1"
 hex = "0.4.3"
+log = "0.4.27"
+tokio = { version = "1.45.1", features = ["full"] }
+futures = "0.3.31"
+
+hmac = "0.12"
+sha2 = "0.10"
+dashmap = "6.1.0"
+crossbeam-queue = "0.3.12"

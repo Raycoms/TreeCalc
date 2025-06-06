@@ -30,7 +30,7 @@
 //todo: Another question is optimistic handup. We can handup faster after some percentage (find formula again), but now we might have to merge things.
 
 pub(crate) fn run() {
-    
+
     /*let N = 1024.0*1024.0*2.0;
 
     //todo binary search
@@ -47,11 +47,29 @@ pub(crate) fn run() {
     let total = best_config.1;
     println!("Final cost for m={m},d={depth}: total: {total}ms");*/
 
-    calculate_cost_2(2097152.0, 312.0, false);
-    calculate_cost_2(2097152.0, 312.0, true);
+    calculate_cost_with_agg_pub_trick(2097152.0, 312.0, false);
+    calculate_cost_with_agg_pub_trick(2097152.0, 312.0, true);
+
+    calculate_cost_with_all_tricks(2097152.0, 312.0, false, false);
+    calculate_cost_with_all_tricks(2097152.0, 312.0, true, false);
+    calculate_cost_with_all_tricks(2097152.0, 312.0, true, true);
+
+    calculate_cost_with_agg_pub_trick_with_majority_rule(2097152.0, 312.0, false);
+    calculate_cost_with_agg_pub_trick_with_majority_rule(2097152.0, 312.0, true);
+
 
     // Final cost for m=312,d=3: total: 2238 - network: 800ms computational: 1438.8167779280739ms, probability: 0.00000003611039045559039
-    // Final cost for m=512,d=3: total: 2324 - network: 800ms computational: 1524.133857952218ms, probability: 0.000000022004769340000507
+
+    // Cost becomes bigger by 1k if we do aggregate-verify -> In the worst case.
+    // Final cost for m=312,d=3: total: 2038 - network: 600ms computational: 1438.8167779280739ms, probability: 0.00000003611039045559039
+    // Final cost for m=312,d=3: total: 1087 - network: 600ms computational: 487.1004580420247ms, probability: 0.00000003611039045559039
+
+    // Final cost for m=312,d=3: total: 2524 - network: 600ms computational: 1924.0565668285374ms, probability: 0.00000003611039045559039
+    // Final cost for m=312,d=3: total: 1096 - network: 600ms computational: 496.48208699946355ms, probability: 0.00000003611039045559039
+    // Final cost for m=312,d=3: total: 886 - network: 600ms computational: 286.6172337672122ms, probability: 0.00000003611039045559039
+
+    // Final cost for m=312,d=3: total: 2238 - network: 800ms computational: 1438.8167779280739ms, probability: 0.00000003611039045559039
+    // Final cost for m=312,d=3: total: 1281 - network: 800ms computational: 481.44532288613846ms, probability: 0.00000003611039045559039
 
     /*
     log_and_calculate_cost(N, 1024.0);
@@ -120,12 +138,12 @@ fn calculate_cost(N: f64, m: f64) -> (i32, i32) {
     let AGG_PUB_COST = 0.460724574 / 1000000.0 * 1000.0;
 
     let N1: f64 = N / m;
-    let m1 = m / 16.0;
+    let m1 = (m / 16.0).ceil();
 
     let depth = N1.log(m1).ceil() as i32;
 
     // Total network latency
-    let network_latency = LATENCY + LATENCY * depth;
+    let network_latency = LATENCY * depth;
 
     // Initial computation at the first set of nodes.
     let initial_comp = (VERIFYING_COST * m + AGG_PUB_COST * m + AGG_SIG_COST  * m) / C;
@@ -160,7 +178,7 @@ fn calculate_cost_variable(N: f64, m: f64, growth_factor: f64) -> (i32, i32) {
     let AGG_SIG_COST = 1.068981688 / 1000000.0 * 1000.0;
     let AGG_PUB_COST = 0.460724574 / 1000000.0 * 1000.0;
 
-    let m1 = m / 16.0;
+    let m1 = (m / 16.0).ceil();
 
     // We start with m and then we do m * 2 for next fanout until finished
     let initial_comp = (VERIFYING_COST * m + AGG_PUB_COST * m + AGG_SIG_COST * m) / C;
@@ -183,7 +201,7 @@ fn calculate_cost_variable(N: f64, m: f64, growth_factor: f64) -> (i32, i32) {
     }
 
     // Total network latency
-    let network_latency = LATENCY + LATENCY * depth;
+    let network_latency = LATENCY * depth;
 
     //println!("Final cost: network: {network_latency}ms computational: initial: {initial_comp}ms, tree comp: {tree_comp}ms");
     let total_comp = initial_comp + tree_comp;
@@ -194,7 +212,7 @@ fn calculate_cost_variable(N: f64, m: f64, growth_factor: f64) -> (i32, i32) {
 }
 
 // also add aggregate-verify as a trick (worst case x2 cost).
-fn calculate_cost_2(N: f64, m: f64, tricks: bool) -> (i32, i32) {
+fn calculate_cost_with_agg_pub_trick(N: f64, m: f64, agg_pub_trick: bool) -> (i32, i32) {
 
     // Round trip time
     let LATENCY = 200;
@@ -216,10 +234,10 @@ fn calculate_cost_2(N: f64, m: f64, tricks: bool) -> (i32, i32) {
 
     // First the leave nodes verify the previous block signature, for this they will have to aggregate all public keys as well.
 
-    let leaf_node_cost = calculate_n_agg_pub_cost(N, tricks, 2.0) / C + VERIFYING_COST + BLOCK_VALIDATION_COST;
+    let leaf_node_cost = calculate_n_agg_pub_cost(N, agg_pub_trick, 2.0) / C + VERIFYING_COST + BLOCK_VALIDATION_COST;
 
     // Total network latency
-    let network_latency = LATENCY + LATENCY * depth;
+    let network_latency = LATENCY * depth;
 
     // Initial computation at the first set of nodes.
     // Verify all signatures and build an aggregate.
@@ -240,16 +258,162 @@ fn calculate_cost_2(N: f64, m: f64, tricks: bool) -> (i32, i32) {
         current_faulty_ratio = current_faulty_ratio - 1.0/6.0;
     }
 
+    current_faulty_ratio = current_faulty_ratio * 2.0/3.0;
+
+
     // At the top of the tree, as we don't have a perfectly balanced tree, fanout might be smaller (this is good actually as it reduces leader load)
     let final_fanout = m1.min(nodes_left.ceil());
-    let leader_comp = (VERIFYING_COST * final_fanout * 16.0 + calculate_n_agg_pub_cost(N, tricks, 2.0) + AGG_SIG_COST * final_fanout * 16.0 * 2.0) / C;
+    let leader_comp = (VERIFYING_COST * final_fanout * 16.0 + calculate_n_agg_pub_cost(N, agg_pub_trick, 2.0) + AGG_SIG_COST * final_fanout * 16.0 * 2.0) / C;
 
     //println!("Final cost: network: {network_latency}ms computational: initial: {initial_comp}ms, tree comp: {tree_comp}ms");
     let total_comp = initial_comp + tree_comp + leader_comp + leaf_node_cost;
     let total = total_comp as i32 + network_latency;
 
     let partial_prob = (1.0 - current_faulty_ratio).powf(64.0);
-    let failure_probability : f64 = 1.0-(1.0-partial_prob).powf(N1);
+    let failure_probability : f64 = (1.0-(1.0 - partial_prob).powf(N1))*100.0;
+    println!("Final cost for m={m},d={depth}: total: {total} - network: {network_latency}ms computational: {total_comp}ms, probability: {failure_probability}");
+    //println!("-----------------------------------------------------------------------------------------")
+    (depth+1, total)
+}
+
+// also add aggregate-verify as a trick (worst case x2 cost).
+fn calculate_cost_with_all_tricks(N: f64, m: f64, agg_pub_trick: bool, agg_verify_trick: bool) -> (i32, i32) {
+
+    // Round trip time
+    let LATENCY = 200;
+
+    // Number of cores for this.
+    let C = 4.0;
+
+    let mut multplier = 2.0;
+    if agg_verify_trick {
+        multplier = 1.0;
+    }
+
+    // Previous block validation, let's assume 200ms, fixed cost.
+    let BLOCK_VALIDATION_COST = 200.0;
+
+    let VERIFYING_COST = 882.21440825 / 1000000.0 * 1000.0;
+    let AGG_SIG_COST = 1.068981688 / 1000000.0 * 1000.0;
+    let SINGLE_AGG_PUB_COST = 0.460724574 / 1000000.0 * 1000.0;
+
+    let N1: f64 = N / m;
+    let m1 = m / 16.0;
+
+    let depth = N1.log(m1).ceil() as i32;
+
+    // First the leave nodes verify the previous block signature, for this they will have to aggregate all public keys as well.
+
+    let leaf_node_cost = calculate_n_agg_pub_cost(N, agg_pub_trick, 2.0) / C + VERIFYING_COST + BLOCK_VALIDATION_COST;
+
+    // Total network latency
+    let network_latency = LATENCY * depth;
+
+    // Initial computation at the first set of nodes.
+    // Verify all signatures and build an aggregate.
+    let initial_comp = (VERIFYING_COST * m + SINGLE_AGG_PUB_COST * m + AGG_SIG_COST * m) / C;
+    // todo Can we use MACs to make this cheaper? (async the verification of public key sig then connect and setup mac connection).
+    //  then we only have to verify the actual signatures we use, which is for all the other ones, just the smaller fanout.
+
+    let mut tree_comp = 0.0;
+    let mut nodes_left = N1;
+
+    let mut current_faulty_ratio : f64 = 2.0/3.0;
+
+    let mut previous_nodes = m;
+    for i in 1..depth {
+        tree_comp += (VERIFYING_COST + m * VERIFYING_COST * (multplier-1.0) + m1 * AGG_SIG_COST * 2.0 + previous_nodes * SINGLE_AGG_PUB_COST * multplier * 2.0) / C;
+        //println!("{} {}", i, N.min(m*m1.powi(i)));
+        nodes_left = nodes_left / m1;
+        previous_nodes = previous_nodes * m1;
+
+        current_faulty_ratio = current_faulty_ratio - 1.0/6.0;
+    }
+
+    current_faulty_ratio = current_faulty_ratio * 2.0/3.0;
+
+    // At the top of the tree, as we don't have a perfectly balanced tree, fanout might be smaller (this is good actually as it reduces leader load)
+    let final_fanout = m1.min(nodes_left.ceil());
+    let leader_comp = (VERIFYING_COST + VERIFYING_COST * final_fanout * 16.0 * (multplier-1.0) + calculate_n_agg_pub_cost(N, agg_pub_trick, 2.0) * multplier + AGG_SIG_COST * final_fanout * 16.0 * 2.0) / C;
+
+    //println!("Final cost: network: {network_latency}ms computational: initial: {initial_comp}ms, tree comp: {tree_comp}ms");
+    let total_comp = initial_comp + tree_comp + leader_comp + leaf_node_cost;
+    let total = total_comp as i32 + network_latency;
+
+    let partial_prob = (1.0 - current_faulty_ratio).powf(64.0);
+    let failure_probability : f64 = (1.0-(1.0 - partial_prob).powf(N1))*100.0;
+    println!("Final cost for m={m},d={depth}: total: {total} - network: {network_latency}ms computational: {total_comp}ms, probability: {failure_probability}");
+    //println!("-----------------------------------------------------------------------------------------")
+    (depth+1, total)
+}
+
+// todo: Think: We want tcp connections and exchange cheap symmetric signatures ahead of time. We have pretty few connections, so this is cheap and we can use cheap communication on demand.
+
+// also add aggregate-verify as a trick (worst case x2 cost).
+fn calculate_cost_with_agg_pub_trick_with_majority_rule(N: f64, m: f64, agg_pub_trick: bool) -> (i32, i32) {
+
+    // Round trip time
+    let LATENCY = 200;
+
+    // Number of cores for this.
+    let C = 4.0;
+
+    let mut multplier = 2.0;
+    if agg_pub_trick {
+        multplier = 1.0;
+    }
+
+    // Previous block validation, let's assume 200ms, fixed cost.
+    let BLOCK_VALIDATION_COST = 200.0;
+
+    let VERIFYING_COST = 882.21440825 / 1000000.0 * 1000.0;
+    let AGG_SIG_COST = 1.068981688 / 1000000.0 * 1000.0;
+    let SINGLE_AGG_PUB_COST = 0.460724574 / 1000000.0 * 1000.0;
+
+    let N1: f64 = N / m;
+    let m1 = m / 16.0;
+
+    let depth = N1.log(m1).ceil() as i32;
+
+    // First the leave nodes verify the previous block signature, for this they will have to aggregate all public keys as well.
+
+    let leaf_node_cost = calculate_n_agg_pub_cost(N, agg_pub_trick, multplier) / C + VERIFYING_COST + BLOCK_VALIDATION_COST;
+
+    // Total network latency
+    let network_latency = LATENCY + LATENCY * depth;
+
+    // Initial computation at the first set of nodes.
+    // Verify all signatures and build an aggregate.
+    let initial_comp = (VERIFYING_COST * m + SINGLE_AGG_PUB_COST * m + AGG_SIG_COST * m) / C;
+    //todo think of costs here. We have some O(n^2) cheap sig still 128 microseconds. so 0,128 ms.
+
+    let mut tree_comp = 0.0;
+    let mut nodes_left = N1;
+
+    let mut current_faulty_ratio : f64 = 0.876;
+
+    let mut previous_nodes = m;
+    for i in 1..depth {
+        tree_comp += (m * VERIFYING_COST + m1 * AGG_SIG_COST * multplier + previous_nodes * SINGLE_AGG_PUB_COST * multplier) / C;
+        //println!("{} {}", i, N.min(m*m1.powi(i)));
+        nodes_left = nodes_left / m1;
+        previous_nodes = previous_nodes * m1;
+
+        current_faulty_ratio = current_faulty_ratio * current_faulty_ratio
+    }
+
+    current_faulty_ratio = current_faulty_ratio * 2.0/3.0;
+
+    // At the top of the tree, as we don't have a perfectly balanced tree, fanout might be smaller (this is good actually as it reduces leader load)
+    let final_fanout = m1.min(nodes_left.ceil());
+    let leader_comp = (VERIFYING_COST * final_fanout * 16.0 + calculate_n_agg_pub_cost(N, agg_pub_trick, multplier) + AGG_SIG_COST * final_fanout * 16.0 * multplier) / C;
+
+    //println!("Final cost: network: {network_latency}ms computational: initial: {initial_comp}ms, tree comp: {tree_comp}ms");
+    let total_comp = initial_comp + tree_comp + leader_comp + leaf_node_cost;
+    let total = total_comp as i32 + network_latency;
+
+    let partial_prob = (1.0 - current_faulty_ratio).powf(64.0);
+    let failure_probability : f64 = (1.0-(1.0 - partial_prob).powf(N1))*100.0;
     println!("Final cost for m={m},d={depth}: total: {total} - network: {network_latency}ms computational: {total_comp}ms, probability: {failure_probability}");
     //println!("-----------------------------------------------------------------------------------------")
     (depth+1, total)
