@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::thread::{sleep};
 use std::time::Duration;
 use blst::byte;
@@ -58,7 +59,7 @@ impl Simulator {
     }
 
     // Prepare simulator. Open all necessary sockets and initiate signatures and public keys.
-    pub async fn prepare(&mut self) -> Vec<PublicKey> {
+    pub async fn prepare(&mut self) -> Vec<Arc<PublicKey>> {
 
         // We set up connections for: Leaf nodes, siblings & parent nodes.
 
@@ -109,7 +110,7 @@ impl Simulator {
     }
 }
 
-pub async fn setup_leaf_nodes(simulator: &mut Simulator, base_port : usize, range: usize) -> (Vec<Sender<()>>, Vec<PublicKey>, HashMap<usize, Signature>) {
+pub async fn setup_leaf_nodes(simulator: &mut Simulator, base_port : usize, range: usize) -> (Vec<Sender<()>>, Vec<Arc<PublicKey>>, HashMap<usize, Signature>) {
     let mut channels = Vec::new();
     let mut public_keys = Vec::new();
     let mut port_to_sig_map = HashMap::new();
@@ -120,7 +121,6 @@ pub async fn setup_leaf_nodes(simulator: &mut Simulator, base_port : usize, rang
         let listener = TcpListener::bind(&addr).await.unwrap();
 
         // Spawn a task to accept connections on this listener
-        let proposal = simulator.proposal.clone();
         let (tx, mut rx) = mpsc::channel::<()>(2);
         channels.push(tx);
 
@@ -130,9 +130,9 @@ pub async fn setup_leaf_nodes(simulator: &mut Simulator, base_port : usize, rang
 
         let pvt_key = SecretKey::key_gen(&ikm, &[]).unwrap();
         let pub_key = pvt_key.sk_to_pk();
-        public_keys.push(pub_key);
+        public_keys.push(Arc::new(pub_key));
 
-        let sig = pvt_key.sign(&proposal, DST, &[]);
+        let sig = pvt_key.sign(&simulator.proposal, DST, &[]);
         port_to_sig_map.insert(i, sig.clone());
 
         task::spawn(async move {
