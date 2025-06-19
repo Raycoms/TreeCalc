@@ -78,7 +78,9 @@ pub(crate) async fn main() {
     println!("Now 2: {}", time_now.elapsed().as_millis());
     for mut dep_based in depth_based_internal_aggregator_vec.iter_mut() {
         dep_based.run().await;
+        println!("Now x: {}", time_now.elapsed().as_millis());
     }
+
 
     // ----- Types of Roles: -----
     // Leaf node: Verifies initial proposal, signs it, and sends it out (TODO)

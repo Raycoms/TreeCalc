@@ -69,7 +69,7 @@ impl FirstInternalAggregator {
 
     // Prepare simulator. Open all necessary sockets and initiate signatures and public keys.
     pub async fn connect(&mut self) {
-        let base_port = 40_000 + (self.depth - 1) * 1000;
+        let base_port = 40_000 + (self.depth - 1) * 2000;
         // Currently just leader, in the future this has to be a setting.
         setup_parent_connections(base_port, 128, &mut self.parent_channels).await;
     }
@@ -293,7 +293,7 @@ pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>,
                             if sig.verify(false, &local_proposal_copy, DST, &[], &pub_key, false).eq(&BLST_SUCCESS) {
                                 local_sender_copy.send((group_id, bit_vec, sig, pub_key)).await.unwrap();
                             } else {
-                                println!("Invalid Sig from {}", address);
+                                println!("FI: Invalid Sig from {} {}", group_id, address);
                             }
                         }
 
@@ -312,7 +312,7 @@ pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>,
 
 pub async fn setup_parent_connections(base_port : usize, range: usize, sender: &mut broadcast::Sender<(BitVec, Signature, BitVec, Signature)>) {
     for i in 0..range {
-        let port = base_port + 1;
+        let port = base_port;
         let addr = format!("127.0.0.1:{}", port);
         let mut stream = TcpStream::connect(&addr).await.unwrap();
         let port_string = port.to_string();

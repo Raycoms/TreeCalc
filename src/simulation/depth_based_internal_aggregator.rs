@@ -4,11 +4,10 @@ use async_channel::{Receiver, Sender};
 use bit_vec::BitVec;
 use blst::{byte};
 use blst::BLST_ERROR::BLST_SUCCESS;
-use blst::min_pk::{AggregatePublicKey, AggregateSignature, PublicKey, SecretKey, Signature};
+use blst::min_pk::{AggregatePublicKey, AggregateSignature, PublicKey, Signature};
 use fxhash::FxHashMap;
 use hmac::digest::typenum::Bit;
 use hmac::Mac;
-use rand_core::RngCore;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
@@ -30,7 +29,7 @@ pub struct DepthBasedInternalAggregator {
     // Public keys of all nodes in the system.
     pub public_keys: Arc<Vec<Arc<PublicKey>>>,
     // Channel to hand signatures that come from the children and process them.
-    pub signature_receiver: Receiver<(usize,BitVec, Signature, PublicKey)>
+    pub signature_receiver: Receiver<(usize, BitVec, Signature, PublicKey, BitVec, Signature, PublicKey)>
 }
 
 impl Default for DepthBasedInternalAggregator {
@@ -62,11 +61,11 @@ impl DepthBasedInternalAggregator {
     }
 
     pub async fn open_connections(&mut self) {
-        let base_port = 40_000 + 1000 * self.depth;
+        let base_port = 40_000 + 2000 * self.depth;
 
         let (signature_sender, signature_receiver) = async_channel::bounded(self.m);
 
-        let expected_sigs = (self.m / 16)^(self.total_depth + 1 - self.depth) * self.m;
+        let expected_sigs = (self.m / 16).pow((self.total_depth - self.depth) as u32) * self.m;
 
         connect_to_child_nodes(base_port, &self.proposal, &self.public_keys, &mut self.child_channels, signature_sender, expected_sigs).await;
         self.signature_receiver=signature_receiver;
@@ -77,7 +76,7 @@ impl DepthBasedInternalAggregator {
     // Prepare simulator. Open all necessary sockets and initiate signatures and public keys.
     pub async fn connect(&mut self) {
 
-        let base_port = 40_000 + 1000 * self.depth;
+        let base_port = 40_000 + 2000 * self.depth;
         if self.depth == 0 {
             // No parent connection.
         } else if self.depth == 1 {
@@ -107,7 +106,7 @@ impl DepthBasedInternalAggregator {
         let mut overlap_bitvec_map = FxHashMap::default();
 
         let mut runs = 0;
-        while let Ok((idx, bit_vec, sig, pub_key)) = self.signature_receiver.recv().await {
+        while let Ok((idx, bit_vec, sig, pub_key, bit_vec2, sig2, pub2)) = self.signature_receiver.recv().await {
             runs+=1;
 
             if let Some((local_bit_vec, local_sig, local_pub_key)) = biggest_result_map.get(&idx) {
@@ -120,7 +119,7 @@ impl DepthBasedInternalAggregator {
                 biggest_result_map.insert(idx, (bit_vec.clone(), sig, pub_key));
 
                 let mut count_vec = Vec::new();
-                for bit in bit_vec.iter() {
+                for bit in bit_vec2.iter() {
                     if bit {
                         count_vec.push(1);
                     }
@@ -129,18 +128,21 @@ impl DepthBasedInternalAggregator {
                     }
                 }
                 overlap_calc_map.insert(idx, count_vec);
-                overlap_bitvec_map.insert(idx, BitVec::from_elem(bit_vec.len(), false));
+                overlap_bitvec_map.insert(idx, BitVec::from_elem(bit_vec2.len(), false));
 
                 let mut overlap_vec = Vec::new();
-                overlap_vec.push((bit_vec, sig, pub_key));
+                overlap_vec.push((bit_vec2, sig2, pub2));
                 all_message_map.insert(idx, overlap_vec);
 
+                if runs >= m_copy {
+                    break;
+                }
                 continue
             }
 
             if let Some((mut le_vec)) = all_message_map.get_mut(&idx) {
                 let count_vec = overlap_calc_map.get_mut(&idx).unwrap();
-                for (local_idx, bool) in bit_vec.iter().enumerate() {
+                for (local_idx, bool) in bit_vec2.iter().enumerate() {
                     if bool {
                         count_vec[local_idx] += 1;
                         // If more than 2 thirds
@@ -151,9 +153,8 @@ impl DepthBasedInternalAggregator {
                 }
 
                 // If bigger insert.
-                le_vec.push((bit_vec, sig, pub_key));
+                le_vec.push((bit_vec2, sig2, pub2));
             }
-
 
             if runs >= m_copy {
                 break;
@@ -234,7 +235,7 @@ impl DepthBasedInternalAggregator {
 }
 
 // connect to m child nodes. So we assume they're al
-pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>, public_keys: &Arc<Vec<Arc<PublicKey>>>, sender: &broadcast::Sender<()>, signature_sender: Sender<(usize, BitVec, Signature, PublicKey)>, expected_sigs: usize) {
+pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>, public_keys: &Arc<Vec<Arc<PublicKey>>>, sender: &broadcast::Sender<()>, signature_sender: Sender<(usize, BitVec, Signature, PublicKey, BitVec, Signature, PublicKey)>, expected_sigs: usize) {
 
     println!("Opening Port: {}", base_port);
 
@@ -242,7 +243,6 @@ pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>,
     let port = base_port;
     let addr = format!("127.0.0.1:{}", port);
     let listener = TcpListener::bind(&addr).await.unwrap();
-    println!("Listening on {}", addr);
     let mut local_sender = sender.clone();
 
     let sender_copy = signature_sender.clone();
@@ -273,8 +273,7 @@ pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>,
                         socket.read_exact(&mut group_id_buffer).await.unwrap();
                         let group_id = usize::from_be_bytes(group_id_buffer);
 
-                        //todo bit vector is bigger!
-                        let mut bit_vec_buffer = Vec::with_capacity(local_expected_sigs/8);
+                        let mut bit_vec_buffer = vec![0u8; local_expected_sigs / 8];
                         socket.read_exact(&mut bit_vec_buffer).await.unwrap();
                         let bit_vec = BitVec::from_bytes(&bit_vec_buffer);
 
@@ -285,12 +284,12 @@ pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>,
                                 sig
                             }
                             Err(err) => {
-                                eprintln!("uhhhhhhhhhhhhherrrr {:?}", err);
+                                eprintln!("DBI: BLS load Error 1 {} {} {:?}", local_expected_sigs, port_string, err);
                                 return;
                             }
                         };
 
-                        let mut bit_vec_buffer2 = Vec::with_capacity(local_expected_sigs/8);
+                        let mut bit_vec_buffer2 = vec![0u8; local_expected_sigs / 8];
                         socket.read_exact(&mut bit_vec_buffer2).await.unwrap();
                         let bit_vec2 = BitVec::from_bytes(&bit_vec_buffer2);
 
@@ -301,11 +300,10 @@ pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>,
                                 sig2
                             }
                             Err(err) => {
-                                eprintln!("uhhhhhhhhhhhhherrrr {:?}", err);
+                                eprintln!("DBI: BLS load Error 2 {:?}", err);
                                 return;
                             }
                         };
-                        //todo we need to hand those up and compute them as well. But for now it's fine.
 
                         let mut mac_buffer = [0; 32];
                         socket.read_exact(&mut mac_buffer).await.unwrap();
@@ -319,9 +317,8 @@ pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>,
                             println!("Invalid Mac from {}", address);
                         } else {
 
-
                             let mut pubs = Vec::new();
-                            let start_index = group_id * 320;
+                            let start_index = group_id * local_expected_sigs;
                             for (local_index, available) in bit_vec.iter().enumerate() {
                                 if available {
                                     let index = start_index + local_index;
@@ -330,11 +327,22 @@ pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>,
                             }
                             let pub_key = AggregatePublicKey::aggregate(&pubs, false).unwrap().to_public_key();
 
+                            let mut pubs2 = Vec::new();
+                            for (local_index, available) in bit_vec2.iter().enumerate() {
+                                if available {
+                                    let index = start_index + local_index;
+                                    pubs2.push(local_public_keys_copy.get(index).unwrap().as_ref());
+                                }
+                            }
+                            let pub_key2 = AggregatePublicKey::aggregate(&pubs, false).unwrap().to_public_key();
+
+
                             // This verify is only necessary in the worst case here. For a best/avg-case simulation we can drop this.
-                            if sig.verify(false, &local_proposal_copy, DST, &[], &pub_key, false).eq(&BLST_SUCCESS) {
-                                local_sender_copy.send((group_id, bit_vec, sig, pub_key)).await.unwrap();
+                            if sig.verify(false, &local_proposal_copy, DST, &[], &pub_key, false).eq(&BLST_SUCCESS) &&
+                                sig2.verify(false, &local_proposal_copy, DST, &[], &pub_key2, false).eq(&BLST_SUCCESS) {
+                                local_sender_copy.send((group_id, bit_vec, sig, pub_key, bit_vec2, sig2, pub_key2)).await.unwrap();
                             } else {
-                                println!("Invalid Sig from {}", address);
+                                println!("DBI: Invalid Sig from {}", address);
                             }
                         }
 
