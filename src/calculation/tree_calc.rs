@@ -14,7 +14,7 @@
 // Aggregating Signatures 1000 times took: 1.085346ms
 // Aggregating Signatures 10000 times took: 10.856701ms
 // Aggregating Signatures 100000 times took: 108.272533ms
-// Aggregating Signatures 1000000 times took: 1.068981688s
+// Aggregating Signatures 1000000 times took: 1.068981688s. So 2.5m is 2.5s, and 2x = 5s /4 = 1s
 
 // Final cost for m=1024,d=2: network: 600ms computational: 806.8042831103999ms
 // Final cost for m=512,d=2: network: 600ms computational: 401.51501370009595ms

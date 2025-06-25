@@ -2,7 +2,6 @@ use crate::simulation::main::{HmacSha256, DST};
 use bit_vec::BitVec;
 use blst::byte;
 use blst::min_pk::{AggregatePublicKey, AggregateSignature, PublicKey, SecretKey, Signature};
-use blst::BLST_ERROR::BLST_SUCCESS;
 use hmac::Mac;
 use rand_core::RngCore;
 use std::collections::HashMap;
@@ -27,6 +26,7 @@ pub struct Simulator {
     pub leaf_channels: broadcast::Sender<()>,
     pub sibling_channels: broadcast::Sender<()>,
     pub parent_channels: broadcast::Sender<()>,
+    pub leaf_parent_channels: broadcast::Sender<()>,
     pub consensus_data: Arc<HashMap<usize, Vec<(PublicKey, Signature, BitVec)>>>,
 }
 
@@ -41,11 +41,12 @@ impl Simulator {
             leaf_channels: broadcast::channel(2).0,
             sibling_channels: broadcast::channel(2).0,
             parent_channels: broadcast::channel(2).0,
+            leaf_parent_channels: broadcast::channel(2).0,
             consensus_data: Arc::new(HashMap::new()),
         }
     }
 
-    pub async fn open_connections(&mut self) -> Vec<Arc<PublicKey>> {
+    pub async fn open_connections(&mut self) -> (Vec<Arc<PublicKey>>, Signature, Signature) {
         // We set up connections for: Leaf nodes, siblings & parent nodes.
         let mut pub_keys = Vec::new();
 
@@ -150,11 +151,18 @@ impl Simulator {
             println!("In map: {} {}", i.0, i.1.len());
         }
 
+        let mut sigs = Vec::new();
+        for (pub_key, sig, bit_vec) in agg_map.get(&(agg_map.len()-1)).unwrap().iter() {
+            sigs.push(sig);
+        }
+
+        let agg_sig = AggregateSignature::aggregate(&sigs, false).unwrap().to_signature();
+
         println!("Finished Aggregation, Opening Connections");
 
 
         // Leaf nodes will send out messages to their parent
-        setup_leaf_nodes(self, 10_000, self.m, &sig_vec).await;
+        setup_leaf_nodes(self, 10_000, self.m-1, &sig_vec).await;
         println!("Finished preparing Simulator leaf connections");
 
         setup_sibling_connection(20_000, 127, &sig_vec, self.m, &mut self.sibling_channels).await;
@@ -177,7 +185,7 @@ impl Simulator {
         // Sleep a sec and let the thread creation and listener creation finish.
         sleep(Duration::from_secs(1));
 
-        Vec::from(pub_keys)
+        (Vec::from(pub_keys), agg_sig, sig_vec.get(0).unwrap().clone())
     }
 
     // Run simulator by notifying all threads to send the message to the client.
@@ -187,6 +195,8 @@ impl Simulator {
 
         // Send out the sibling votes.
         self.sibling_channels.send(()).unwrap();
+
+        setup_leaf_parent_connections( 11_000, self.m - 1, &mut self.leaf_parent_channels).await;
 
         setup_children_connections(&self,30_000, self.m - 1).await;
 
@@ -203,6 +213,7 @@ impl Simulator {
         self.leaf_channels.send(()).unwrap();
         self.sibling_channels.send(()).unwrap();
         self.parent_channels.send(()).unwrap();
+        self.leaf_parent_channels.send(()).unwrap();
     }
 }
 
@@ -212,7 +223,7 @@ pub async fn setup_leaf_nodes(
     range: usize,
     sigs: &Arc<Vec<Signature>>
 ) {
-    for i in 0..range {
+    for i in 1..(range+1) {
         let port = base_port + i;
         let addr = format!("127.0.0.1:{}", port);
         let listener = TcpListener::bind(&addr).await.unwrap();
@@ -331,7 +342,7 @@ pub async fn setup_children_connections(simulator: &Simulator, base_port: usize,
 
         let data_copy = simulator.consensus_data.clone();
 
-        let local_idx = i/20;
+        let local_idx = i/16;
 
         task::spawn(async move {
             let copy = data_copy.get(&0).unwrap();
@@ -357,6 +368,21 @@ pub async fn setup_children_connections(simulator: &Simulator, base_port: usize,
     }
 }
 
+pub async fn setup_leaf_parent_connections(base_port: usize, range: usize, sender: &broadcast::Sender<()>,) {
+
+    // We have m-1 connections. Each of them sends a signature aggregate. 20 distinct ones. The first one we already did!
+    for i in 0..range {
+        let port = base_port + i;
+        let addr = format!("127.0.0.1:{}", port);
+        let mut stream = TcpStream::connect(&addr).await.unwrap();
+        let mut rx = sender.subscribe();
+
+        task::spawn(async move {
+            rx.recv().await.unwrap();
+        });
+    }
+}
+
 pub async fn setup_depth_children_connections(simulator: &Simulator, base_port: usize, range: usize, depth: usize) {
 
     let reverse_idx = simulator.consensus_data.len() - depth - 1;
@@ -367,7 +393,7 @@ pub async fn setup_depth_children_connections(simulator: &Simulator, base_port: 
         let mut stream = TcpStream::connect(&addr).await.unwrap();
 
         let data_copy = simulator.consensus_data.clone();
-        let local_idx = i/20;
+        let local_idx = i/16;
 
         task::spawn(async move {
             let copy = data_copy.get(&reverse_idx).unwrap();

@@ -7,20 +7,12 @@ use crate::simulation::depth_based_internal_aggregator::DepthBasedInternalAggreg
 use crate::simulation::first_internal_aggregator::FirstInternalAggregator;
 use crate::simulation::simulator::Simulator;
 use crate::simulation::leaf_aggregator::LeafAggregator;
+use crate::simulation::leaf_node::LeafNode;
 
 pub const DST: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
 
 // Create alias for HMAC-SHA256
 pub type HmacSha256 = Hmac<Sha256>;
-
-// This is the simulator. At the moment is only does the second lowest level simulation.
-// todo: Update in the future to run this as a full simulation.
-//  missing: - Simulate 1 leaf node
-//           - Simulate upper group parent
-//           - Simulate tree of x-depth parents
-//           - Simulate leader
-//           -> Simulate x nodes in each group
-//           -> Simulation in the bad case (first messages are the f bad ones, and we get a lot of the votes only from siblings etc).
 
 pub(crate) async fn main() {
 
@@ -30,6 +22,11 @@ pub(crate) async fn main() {
     // 320 Internal Aggregator Groups
     // 20 Internal Aggregator Groups
     // 1 Leader
+
+    // Multiple Worst Cases
+    // -> Worst case 1/3 faulty
+    // -> Worst case, bad group distributions under the 1/3 and last one we check
+    // -----> In the presence of 1/3, on average.
 
 
     // Fanout we're considering.
@@ -43,7 +40,7 @@ pub(crate) async fn main() {
     OsRng.fill_bytes(&mut proposal);
 
     let mut simulator = Simulator::new(m, additional_depth, &proposal);
-    let public_keys = simulator.open_connections().await;
+    let (public_keys, agg_sig, my_sig) = simulator.open_connections().await;
     println!("Finished preparing Simulator");
 
     let mut depth_based_internal_aggregator_vec = Vec::new();
@@ -59,6 +56,9 @@ pub(crate) async fn main() {
         dep_based.open_connections().await;
     }
 
+    let mut leaf_node = LeafNode::new(m, &proposal, public_keys.clone(), my_sig, agg_sig);
+    leaf_node.connect().await;
+
     let mut leaf_aggregator = LeafAggregator::new(m, &proposal, public_keys.clone());
     leaf_aggregator.connect().await;
 
@@ -72,26 +72,41 @@ pub(crate) async fn main() {
 
     // Actually run the validator and measure time it took.
     let time_now = Instant::now();
+    leaf_node.run().await;
+    println!("Now 1: {}", time_now.elapsed().as_millis());
     leaf_aggregator.run().await;
-    println!("Now: {}", time_now.elapsed().as_millis());
-    first_internal_aggregator.run().await;
     println!("Now 2: {}", time_now.elapsed().as_millis());
+    first_internal_aggregator.run().await;
+    println!("Now 3: {}", time_now.elapsed().as_millis());
     for mut dep_based in depth_based_internal_aggregator_vec.iter_mut() {
         dep_based.run().await;
-        println!("Now x: {}", time_now.elapsed().as_millis());
+        println!("Now 4x: {}", time_now.elapsed().as_millis());
     }
 
 
     // ----- Types of Roles: -----
-    // Leaf node: Verifies initial proposal, signs it, and sends it out (TODO)
-    //            - Each of the other aggregator types should also be a leaf aggregator and do the initial verification before starting the other work (started alongside the leaf aggregator) (TODO last)
+    // Leaf node: Verifies initial proposal, signs it, and sends sig out (done)
     // Leaf aggregator: Collect leaf votes, aggregate and broadcast (done)
     // Internal aggregator: Collect aggregates from leaf aggregators, aggregate into 2 separate aggregate (largest & majority) and send up to next station (done)
-    // -> Depth based needed still.
-    // Leader aggregator. Collect aggregates from others and join 2 aggregates that we've gotten. (TODO)
-
+    // Leader aggregator. Collect aggregates from others and join 2 aggregates that we've gotten. (done)
 
     // Leaf sends to 128 parents, one of them is real (simulator only has to create 127 now, we create a new validatortype for this that listens to the m input.)
+
+    //todo ethereum might've adjusted to weighted voting?
+
+    //todo: atm they all do public key aggregates for all 20 different groups, this is suuuuuper expensive.
+    //todo: Can we do sth about this? Think?
+
+    //todo: Simulate average 1/3 byz case
+
+    //todo: On highest level we might want to have signatures and not Macs. As verify cost < agg pub cost.
+
+    // Do group by group. Try to find the one that is correct. This is quite fast we can do at least "a few groups".
+    // The leader can verify the rest and send it to the next leader to have them include it.
+    // Next leader only accepts if threshold was not met in the previous block. Slighy overhead but at least we guarantee finality. Becomes then 4 slot finality.
+    // Proof of misbehaviour was sent around as well, so people were slashed for doing this.
+
+    // If we only have to do once the public key agg, we're better off. But in the worst case? ugh?
 
     // Give the program time to wrap up.
     sleep(Duration::from_secs(5));

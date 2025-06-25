@@ -9,7 +9,7 @@ use hmac::Mac;
 use rand_core::RngCore;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::simulation::main::{HmacSha256, DST};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpStream};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task;
 
@@ -84,7 +84,7 @@ impl LeafAggregator {
         println!("Finished preparing Validator sibling connections");
 
         // So we could verify them all independently.
-        for i in 0..4 {
+        for _ in 0..4 {
             let proposal = self.proposal.clone();
 
             let leaf_sig_map_copy = self.signature_map.clone();
@@ -99,13 +99,13 @@ impl LeafAggregator {
                             let _ = sibling_signature_sender2_copy.send((id, sig)).await;
                         }
                     } else {
-                        println!("Got wrong signature from leaf.");
+                        println!("Got wrong signature from leaf. {}", id);
                     }
                 }
             });
         }
 
-        for i in 0..4 {
+        for _ in 0..4 {
             let proposal2 = self.proposal.clone();
             let sibling_sig_map_copy = self.signature_map.clone();
             let local_public_keys2 = self.public_keys.clone();
@@ -130,8 +130,6 @@ impl LeafAggregator {
 
     // Run simulator by notifying all threads to send the message to the client.
     pub async fn run(&mut self) {
-
-        //todo verify previous task signature & public keys. (here we need our hax).
 
         // Send out the leaf votes.
         self.leaf_channels.send(()).unwrap();
@@ -185,7 +183,7 @@ impl LeafAggregator {
         let (mut final_agg_sender, mut final_agg_receiver) = mpsc::channel(100);
 
         // Atm just 4, we want to make this more dynamic in the future.
-        for i in 0..4 {
+        for _ in 0..4 {
             let mut rx2 = rx.clone();
             let mut final_agg_sender_copy = final_agg_sender.clone();
             let m = self.m;
@@ -232,8 +230,6 @@ impl LeafAggregator {
                 break;
             }
         }
-
-        let sig = agg_sig.to_signature();
 
         self.parent_channels.send((bit_vec, agg_sig.to_signature())).unwrap();
         self.parent_channels.closed().await;

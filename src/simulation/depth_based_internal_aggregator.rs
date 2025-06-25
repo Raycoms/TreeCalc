@@ -10,7 +10,7 @@ use hmac::digest::typenum::Bit;
 use hmac::Mac;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast};
 use tokio::task;
 use crate::simulation::main::{HmacSha256, DST};
 
@@ -66,7 +66,7 @@ impl DepthBasedInternalAggregator {
         let (signature_sender, signature_receiver) = async_channel::bounded(self.m);
 
         let expected_sigs = (self.m / 16).pow((self.total_depth - self.depth) as u32) * self.m;
-
+        println!("Expected sigs: {} at {} at {}", expected_sigs, self.depth, base_port);
         connect_to_child_nodes(base_port, &self.proposal, &self.public_keys, &mut self.child_channels, signature_sender, expected_sigs).await;
         self.signature_receiver=signature_receiver;
 
@@ -75,18 +75,18 @@ impl DepthBasedInternalAggregator {
 
     // Prepare simulator. Open all necessary sockets and initiate signatures and public keys.
     pub async fn connect(&mut self) {
-
-        let base_port = 40_000 + 2000 * self.depth;
         if self.depth == 0 {
             // No parent connection.
-        } else if self.depth == 1 {
-            // Only the leader.
-            setup_parent_connections(base_port, 1, &mut self.parent_channels).await;
         } else {
-            // Next higher up group.
-            setup_parent_connections(base_port, 128, &mut self.parent_channels).await;
+            let base_port = 40_000 + 2000 * (self.depth - 1);
+            if self.depth == 1 {
+                // Only the leader.
+                setup_parent_connections(base_port, 1, &mut self.parent_channels).await;
+            } else {
+                // Next higher up group.
+                setup_parent_connections(base_port, 128, &mut self.parent_channels).await;
+            }
         }
-
     }
 
     // Run simulator by notifying all threads to send the message to the client.
@@ -161,7 +161,7 @@ impl DepthBasedInternalAggregator {
             }
         }
 
-        println!("Got all the sigs {} {} {}", biggest_result_map.len(), overlap_bitvec_map.len(), overlap_calc_map.len());
+        println!("Got all the sigs {} {} {} at depth {}", biggest_result_map.len(), overlap_bitvec_map.len(), overlap_calc_map.len(), self.depth);
 
         let proposal_copy = self.proposal.clone();
         let biggest_future = task::spawn_blocking(move || {
@@ -178,10 +178,10 @@ impl DepthBasedInternalAggregator {
             let agg_pub = AggregatePublicKey::aggregate(&pub_vec, false).unwrap().to_public_key();
             let agg_sig = AggregateSignature::aggregate(&sig_vec, false).unwrap().to_signature();
 
-            //todo disable, not necessary in future.
-            if !agg_sig.verify(false, &proposal_copy, DST, &[], &agg_pub, false).eq(&BLST_SUCCESS) {
-                panic!("Failed to verify agg signature");
-            }
+            // not necessary.
+            // if !agg_sig.verify(false, &proposal_copy, DST, &[], &agg_pub, false).eq(&BLST_SUCCESS) {
+            //    panic!("Failed to verify agg signature");
+            //}
             return (result_bit_vec, agg_sig, agg_pub);
         });
 
@@ -211,19 +211,21 @@ impl DepthBasedInternalAggregator {
             let agg_pub = AggregatePublicKey::aggregate(&pub_vec, false).unwrap().to_public_key();
             let agg_sig = AggregateSignature::aggregate(&sig_vec, false).unwrap().to_signature();
 
-            //todo disable, not necessary in future.
-            if !agg_sig.verify(false, &proposal_copy2, DST, &[], &agg_pub, false).eq(&BLST_SUCCESS) {
-                panic!("Failed to verify agg signature");
-            }
+            //not necessary.
+            //if !agg_sig.verify(false, &proposal_copy2, DST, &[], &agg_pub, false).eq(&BLST_SUCCESS) {
+            //    panic!("Failed to verify agg signature");
+            //}
             return (result_bit_vec, agg_sig, agg_pub);
         });
 
         let (biggest_bit_vec, biggest_agg_sig, biggest_pub) = biggest_future.await.unwrap();
         let (overlap_bit_vec, overlap_agg_sig, overlap_pub) = overlap_future.await.unwrap();
 
-
-        self.parent_channels.send((biggest_bit_vec, biggest_agg_sig, overlap_bit_vec, overlap_agg_sig)).unwrap();
-        self.parent_channels.closed().await;
+        // Leader has no further parent.
+        if self.depth != 0 {
+            self.parent_channels.send((biggest_bit_vec, biggest_agg_sig, overlap_bit_vec, overlap_agg_sig)).unwrap();
+            self.parent_channels.closed().await;
+        }
     }
 
     // Kill simulator by closing all sockets and killing all idling threads.
@@ -284,7 +286,7 @@ pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>,
                                 sig
                             }
                             Err(err) => {
-                                eprintln!("DBI: BLS load Error 1 {} {} {:?}", local_expected_sigs, port_string, err);
+                                eprintln!("DBI: BLS load Error 1 {:?}", err);
                                 return;
                             }
                         };
@@ -334,15 +336,18 @@ pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>,
                                     pubs2.push(local_public_keys_copy.get(index).unwrap().as_ref());
                                 }
                             }
-                            let pub_key2 = AggregatePublicKey::aggregate(&pubs, false).unwrap().to_public_key();
-
+                            let pub_key2 = AggregatePublicKey::aggregate(&pubs2, false).unwrap().to_public_key();
 
                             // This verify is only necessary in the worst case here. For a best/avg-case simulation we can drop this.
-                            if sig.verify(false, &local_proposal_copy, DST, &[], &pub_key, false).eq(&BLST_SUCCESS) &&
-                                sig2.verify(false, &local_proposal_copy, DST, &[], &pub_key2, false).eq(&BLST_SUCCESS) {
-                                local_sender_copy.send((group_id, bit_vec, sig, pub_key, bit_vec2, sig2, pub_key2)).await.unwrap();
+                            if sig.verify(false, &local_proposal_copy, DST, &[], &pub_key, false).eq(&BLST_SUCCESS) {
+                                if sig2.verify(false, &local_proposal_copy, DST, &[], &pub_key2, false).eq(&BLST_SUCCESS) {
+                                    local_sender_copy.send((group_id, bit_vec, sig, pub_key, bit_vec2, sig2, pub_key2)).await.unwrap();
+                                } else {
+                                    println!("DBI2: Invalid Sig from {}", address);
+                                }
                             } else {
-                                println!("DBI: Invalid Sig from {}", address);
+                                //todo not working?  
+                                println!("DBI1: Invalid Sig from {}", address);
                             }
                         }
 
@@ -379,7 +384,9 @@ pub async fn setup_parent_connections(base_port : usize, range: usize, sender: &
             if let Ok((bit_vec, sig, bit_vec2, sig2)) = rx.recv().await {
                 unwrapped_mac.update(&sig.clone().to_bytes());
 
-                let index : usize = 1;
+                println!("send to: {} {} {}", i.clone(), port.clone(), bit_vec.len());
+
+                let index : usize = 0;
                 stream.write(&index.to_be_bytes()).await.unwrap();
                 stream.write(&bit_vec.to_bytes()).await.unwrap();
                 stream.write(&sig.to_bytes()).await.unwrap();

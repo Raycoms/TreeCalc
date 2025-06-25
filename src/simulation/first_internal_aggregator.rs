@@ -8,7 +8,6 @@ use blst::min_pk::{AggregatePublicKey, AggregateSignature, PublicKey, SecretKey,
 use fxhash::FxHashMap;
 use hmac::digest::typenum::Bit;
 use hmac::Mac;
-use rand_core::RngCore;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
@@ -161,10 +160,10 @@ impl FirstInternalAggregator {
             let agg_pub = AggregatePublicKey::aggregate(&pub_vec, false).unwrap().to_public_key();
             let agg_sig = AggregateSignature::aggregate(&sig_vec, false).unwrap().to_signature();
 
-            //todo disable, not necessary in future.
-            if !agg_sig.verify(false, &proposal_copy, DST, &[], &agg_pub, false).eq(&BLST_SUCCESS) {
-                panic!("Failed to verify agg signature");
-            }
+            //disable, not necessary.
+            //if !agg_sig.verify(false, &proposal_copy, DST, &[], &agg_pub, false).eq(&BLST_SUCCESS) {
+            //    panic!("Failed to verify agg signature");
+            //}
             return (result_bit_vec, agg_sig, agg_pub);
         });
 
@@ -194,10 +193,10 @@ impl FirstInternalAggregator {
             let agg_pub = AggregatePublicKey::aggregate(&pub_vec, false).unwrap().to_public_key();
             let agg_sig = AggregateSignature::aggregate(&sig_vec, false).unwrap().to_signature();
 
-            //todo disable, not necessary in future.
-            if !agg_sig.verify(false, &proposal_copy2, DST, &[], &agg_pub, false).eq(&BLST_SUCCESS) {
-                panic!("Failed to verify agg signature");
-            }
+            //disable, not necessary.
+            //if !agg_sig.verify(false, &proposal_copy2, DST, &[], &agg_pub, false).eq(&BLST_SUCCESS) {
+            //    panic!("Failed to verify agg signature");
+            //}
             return (result_bit_vec, agg_sig, agg_pub);
         });
 
@@ -261,7 +260,7 @@ pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>,
                                 sig
                             }
                             Err(err) => {
-                                eprintln!("uhhhhhhhhhhhhherrrr {:?}", err);
+                                eprintln!("FI: BLS load Error 1 {:?}", err);
                                 return;
                             }
                         };
@@ -312,7 +311,7 @@ pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>,
 
 pub async fn setup_parent_connections(base_port : usize, range: usize, sender: &mut broadcast::Sender<(BitVec, Signature, BitVec, Signature)>) {
     for i in 0..range {
-        let port = base_port;
+        let port = base_port + i;
         let addr = format!("127.0.0.1:{}", port);
         let mut stream = TcpStream::connect(&addr).await.unwrap();
         let port_string = port.to_string();
@@ -330,12 +329,15 @@ pub async fn setup_parent_connections(base_port : usize, range: usize, sender: &
             if let Ok((bit_vec, sig, bit_vec2, sig2)) = rx.recv().await {
                 unwrapped_mac.update(&sig.clone().to_bytes());
 
-                let index : usize = 1;
+                let index : usize = 0;
                 stream.write(&index.to_be_bytes()).await.unwrap();
+
                 stream.write(&bit_vec.to_bytes()).await.unwrap();
                 stream.write(&sig.to_bytes()).await.unwrap();
+
                 stream.write(&bit_vec2.to_bytes()).await.unwrap();
                 stream.write(&sig2.to_bytes()).await.unwrap();
+
                 stream.write(&unwrapped_mac.finalize().into_bytes()).await.unwrap();
             }
         });
