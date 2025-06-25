@@ -34,7 +34,7 @@ pub struct FirstInternalAggregator {
 impl Default for FirstInternalAggregator {
     fn default() -> Self {
         FirstInternalAggregator {
-            m: 320,
+            m: 0,
             depth: 2,
             proposal: Arc::new(Vec::new()),
             child_channels: broadcast::Sender::new(2),
@@ -60,7 +60,7 @@ impl FirstInternalAggregator {
     pub async fn open_connections(&mut self) {
 
         let (signature_sender, signature_receiver) = async_channel::bounded(self.m);
-        connect_to_child_nodes(30_000, &self.proposal, &self.public_keys, &mut self.child_channels, signature_sender).await;
+        connect_to_child_nodes(self.m, 30_000, &self.proposal, &self.public_keys, &mut self.child_channels, signature_sender).await;
         self.signature_receiver=signature_receiver;
 
         println!("Finished preparing internal aggregator connections");
@@ -217,18 +217,20 @@ impl FirstInternalAggregator {
 }
 
 // connect to m child nodes. So we assume they're al
-pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>, public_keys: &Arc<Vec<Arc<PublicKey>>>, sender: &broadcast::Sender<()>, signature_sender: Sender<(usize, BitVec, Signature, PublicKey)>) {
+pub async fn connect_to_child_nodes(m: usize, base_port: usize, proposal: &Arc<Vec<byte>>, public_keys: &Arc<Vec<Arc<PublicKey>>>, sender: &broadcast::Sender<()>, signature_sender: Sender<(usize, BitVec, Signature, PublicKey)>) {
 
     // Listen on base port for connection attempts.
     let port = base_port;
     let addr = format!("127.0.0.1:{}", port);
     let listener = TcpListener::bind(&addr).await.unwrap();
+
     println!("Listening on {}", addr);
     let mut local_sender = sender.clone();
 
     let sender_copy = signature_sender.clone();
     let public_keys_copy = public_keys.clone();
     let proposal_copy = proposal.clone();
+    let m_copy = m.clone();
     task::spawn(async move {
         loop {
             let mut rx = local_sender.subscribe();
@@ -236,6 +238,7 @@ pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>,
             let local_sender_copy = sender_copy.clone();
             let local_public_keys_copy = public_keys_copy.clone();
             let local_proposal_copy = proposal_copy.clone();
+            let local_m_copy = m_copy.clone();
             match listener.accept().await {
                 Ok((mut socket, address)) => {
 
@@ -249,7 +252,7 @@ pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>,
                         socket.read_exact(&mut group_id_buffer).await.unwrap();
                         let group_id = usize::from_be_bytes(group_id_buffer);
 
-                        let mut bit_vec_buffer = [0; 320/8];
+                        let mut bit_vec_buffer = vec![0u8; local_m_copy / 8];
                         socket.read_exact(&mut bit_vec_buffer).await.unwrap();
                         let bit_vec = BitVec::from_bytes(&bit_vec_buffer);
 
@@ -279,7 +282,7 @@ pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>,
 
 
                             let mut pubs = Vec::new();
-                            let start_index = group_id * 320;
+                            let start_index = group_id * local_m_copy;
                             for (local_index, available) in bit_vec.iter().enumerate() {
                                 if available {
                                     let index = start_index + local_index;

@@ -36,7 +36,7 @@ impl Default for DepthBasedInternalAggregator {
     fn default() -> Self {
         DepthBasedInternalAggregator {
             depth: 0,
-            m: 320,
+            m: 0,
             total_depth: 0,
             proposal: Arc::new(Vec::new()),
             child_channels: broadcast::Sender::new(2),

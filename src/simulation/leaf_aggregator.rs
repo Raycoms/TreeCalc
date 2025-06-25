@@ -30,7 +30,7 @@ pub struct LeafAggregator {
 impl Default for LeafAggregator {
     fn default() -> Self {
         LeafAggregator {
-            m: 320,
+            m: 0,
             public_key: PublicKey::default(),
             private_key: SecretKey::default(),
             proposal: Arc::new(Vec::new()),

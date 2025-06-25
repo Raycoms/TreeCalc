@@ -50,13 +50,15 @@ impl Simulator {
         // We set up connections for: Leaf nodes, siblings & parent nodes.
         let mut pub_keys = Vec::new();
 
+        println!("Starting Simulator with {} {}", self.N, self.m);
+
         let (sender, mut receiver) = tokio::sync::mpsc::channel(self.N);
         for _ in 0..8 {
             let proposal_copy = self.proposal.clone();
             let share = self.N/8;
             let senderClone = sender.clone();
             tokio::spawn(async move {
-                println!("Startign task with share: {}", share);
+                println!("Starting task with share: {}", share);
                 for _ in 0..share {
                     let mut ikm = [0u8; 32];
                     {
@@ -127,7 +129,7 @@ impl Simulator {
 
                 compound_bit_vec.extend(bitvec);
 
-                if curr_sig_ref_vec.len() == 20 {
+                if curr_sig_ref_vec.len() == (self.m/16) {
                     let agg_pub = AggregatePublicKey::aggregate(&curr_pub_ref_vec, false).unwrap().to_public_key();
                     let agg_sig = AggregateSignature::aggregate(&curr_sig_ref_vec, false).unwrap().to_signature();
 
