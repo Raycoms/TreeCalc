@@ -59,13 +59,22 @@ pub(crate) async fn main() {
     let mut leaf_node = LeafNode::new(m, &proposal, public_keys.clone(), my_sig, agg_sig);
     leaf_node.connect().await;
 
+    // 200ms network
+
     let mut leaf_aggregator = LeafAggregator::new(m, &proposal, public_keys.clone());
+
+    // 200ms broadcast
     leaf_aggregator.connect().await;
+
+    // 200ms network
 
     first_internal_aggregator.connect().await;
     for mut dep_based in depth_based_internal_aggregator_vec.iter_mut() {
         dep_based.connect().await;
     }
+
+    // 200ms network
+
     // Send out network messages of simulator for the validator to process.
     simulator.run().await;
     println!("Started up Simulator");
