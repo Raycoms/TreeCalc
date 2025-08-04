@@ -1,4 +1,4 @@
-use crate::simulation::main::{HmacSha256, DST};
+use crate::simulation::main::{HmacSha256, DST, PREPARE_POOL};
 use bit_vec::BitVec;
 use blst::byte;
 use blst::min_pk::{AggregatePublicKey, AggregateSignature, PublicKey, SecretKey, Signature};
@@ -12,7 +12,6 @@ use futures::SinkExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
-use tokio::task;
 
 pub struct Simulator {
     // Fanout.
@@ -21,6 +20,8 @@ pub struct Simulator {
     pub depth: usize,
     // Total number of nodes.
     pub N: usize,
+    // Divider of leader fanout.
+    pub leader_divider: usize,
     // Proposal byte vector.
     pub proposal: Vec<byte>,
     pub leaf_channels: broadcast::Sender<()>,
@@ -31,12 +32,13 @@ pub struct Simulator {
 }
 
 impl Simulator {
-    pub fn new(m: usize, depth: usize, proposal: &Vec<u8>) -> Self {
-        let N = (m/16).pow( (depth + 1) as u32)*m;
+    pub fn new(m: usize, depth: usize, proposal: &Vec<u8>, leader_divider: usize) -> Self {
+        let N = (m/16).pow( (depth + 1) as u32) * m / leader_divider;
         Simulator {
             m,
             depth,
             N,
+            leader_divider,
             proposal: proposal.clone(),
             leaf_channels: broadcast::channel(2).0,
             sibling_channels: broadcast::channel(2).0,
@@ -57,7 +59,7 @@ impl Simulator {
             let proposal_copy = self.proposal.clone();
             let share = self.N/8;
             let senderClone = sender.clone();
-            tokio::spawn(async move {
+            PREPARE_POOL.spawn(async move {
                 println!("Starting task with share: {}", share);
                 for _ in 0..share {
                     let mut ikm = [0u8; 32];
@@ -112,6 +114,7 @@ impl Simulator {
 
 
         let mut map_idx = 0;
+        println!("In map: {} {}", map_idx, agg_map.get(&0).unwrap().len());
 
         // Recursively build all levels of the tree.
         loop
@@ -123,6 +126,12 @@ impl Simulator {
             let mut curr_pub_ref_vec = Vec::new();
             let mut curr_sig_ref_vec = Vec::new();
             let mut compound_bit_vec = BitVec::new();
+
+            let mut divider = 1;
+            if (map_idx + 1) == self.depth {
+                divider = self.leader_divider;
+            }
+
             for (pub_key, sig, bitvec) in agg_vec {
                 curr_pub_ref_vec.push(pub_key);
                 curr_sig_ref_vec.push(sig);
@@ -141,10 +150,10 @@ impl Simulator {
                 }
             }
 
-            if local_agg_vec.len() == 1 {
+            if local_agg_vec.len() <= 1 {
                 break;
             }
-
+            println!("In map: {} {} {}", map_idx+1, local_agg_vec.len(), divider);
             agg_map.insert(map_idx+1, local_agg_vec);
             map_idx+=1;
         }
@@ -204,7 +213,12 @@ impl Simulator {
 
         for i in 0..self.depth {
             let base_port = 40_000 + 2000 * i;
-            setup_depth_children_connections(&self, base_port, self.m - 1, i).await;
+            if i == 0 {
+                setup_depth_children_connections(&self, base_port, self.m/self.leader_divider - 1, i, self.leader_divider).await;
+            }
+            else {
+                setup_depth_children_connections(&self, base_port, self.m - 1, i, 1).await;
+            }
         }
         println!("Finished connecting children to parent");
     }
@@ -234,7 +248,7 @@ pub async fn setup_leaf_nodes(
 
         let clone = sigs.clone();
         // Spawn a task to accept connections on this listener
-        task::spawn(async move {
+        PREPARE_POOL.spawn(async move {
             // We atm only need a single connection per port here (saves us from having a lot of async tasks doing nothing).
             match listener.accept().await {
                 Ok((mut socket, addr)) => {
@@ -269,7 +283,7 @@ pub async fn setup_sibling_connection(
 
         // Spawn a task to accept connections on this listener
         let local_port_to_sig = port_to_sig_map.clone();
-        task::spawn(async move {
+        PREPARE_POOL.spawn(async move {
             // We atm only need a single connection per port here (saves us from having a lot of thread doing nothing).
             match listener.accept().await {
                 Ok((mut socket, addr)) => {
@@ -319,7 +333,7 @@ pub async fn setup_parent_connections(
         let mut rx = sender.subscribe();
 
         // Spawn a task to accept connections on this listener
-        task::spawn(async move {
+        PREPARE_POOL.spawn(async move {
             // We atm only need a single connection per port here (saves us from having a lot of thread doing nothing).
             match listener.accept().await {
                 Ok((socket, addr)) => {
@@ -346,7 +360,7 @@ pub async fn setup_children_connections(simulator: &Simulator, base_port: usize,
 
         let local_idx = i/16;
 
-        task::spawn(async move {
+        PREPARE_POOL.spawn(async move {
             let copy = data_copy.get(&0).unwrap();
             let sub_copy = copy.get(local_idx);
 
@@ -379,13 +393,13 @@ pub async fn setup_leaf_parent_connections(base_port: usize, range: usize, sende
         let mut stream = TcpStream::connect(&addr).await.unwrap();
         let mut rx = sender.subscribe();
 
-        task::spawn(async move {
+        PREPARE_POOL.spawn(async move {
             rx.recv().await.unwrap();
         });
     }
 }
 
-pub async fn setup_depth_children_connections(simulator: &Simulator, base_port: usize, range: usize, depth: usize) {
+pub async fn setup_depth_children_connections(simulator: &Simulator, base_port: usize, range: usize, depth: usize, leader_divider: usize) {
 
     let reverse_idx = simulator.consensus_data.len() - depth - 1;
 
@@ -396,8 +410,7 @@ pub async fn setup_depth_children_connections(simulator: &Simulator, base_port: 
 
         let data_copy = simulator.consensus_data.clone();
         let local_idx = i/16;
-
-        task::spawn(async move {
+        PREPARE_POOL.spawn(async move {
             let copy = data_copy.get(&reverse_idx).unwrap();
             let sub_copy = copy.get(local_idx);
             if sub_copy.is_none() {

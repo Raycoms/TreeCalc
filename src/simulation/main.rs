@@ -1,8 +1,10 @@
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use hmac::Hmac;
+use once_cell::sync::Lazy;
 use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
+use tokio::runtime::{Builder, Runtime};
 use crate::simulation::depth_based_internal_aggregator::DepthBasedInternalAggregator;
 use crate::simulation::first_internal_aggregator::FirstInternalAggregator;
 use crate::simulation::simulator::Simulator;
@@ -14,12 +16,33 @@ pub const DST: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
 // Create alias for HMAC-SHA256
 pub type HmacSha256 = Hmac<Sha256>;
 
+// Thread pool 1: 4 threads
+pub(crate) static RUN_POOL: Lazy<Runtime> = Lazy::new(|| {
+    Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_name("run")
+        .enable_all()
+        .build()
+        .unwrap()
+});
+
+// Thread pool 2: 4 threads
+pub(crate) static PREPARE_POOL: Lazy<Runtime> = Lazy::new(|| {
+    Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_name("run")
+        .enable_all()
+        .build()
+        .unwrap()
+});
+
+
 pub(crate) async fn main() {
 
     // 2560000 (2.5m) Leaf nodes
     // 320 fanout
-    // 6400 Leaf Aggregator Groups
-    // 320 Internal Aggregator Groups
+    // 8000 Leaf Aggregator Groups
+    // 400 Internal Aggregator Groups
     // 20 Internal Aggregator Groups
     // 1 Leader
 
@@ -28,10 +51,10 @@ pub(crate) async fn main() {
     // -> Worst case, bad group distributions under the 1/3 and last one we check
     // -----> In the presence of 1/3, on average.
 
-
     // Fanout we're considering.
-    let m = 320;
+    let m = 256;
     let additional_depth = 2;
+    let leader_divider = 1;
 
     // Set up simulator connections.
 
@@ -39,14 +62,18 @@ pub(crate) async fn main() {
     let mut proposal = vec![0u8; 100_000];
     OsRng.fill_bytes(&mut proposal);
 
-    let mut simulator = Simulator::new(m, additional_depth, &proposal);
+    let mut simulator = Simulator::new(m, additional_depth, &proposal, leader_divider);
     let (public_keys, agg_sig, my_sig) = simulator.open_connections().await;
     println!("Finished preparing Simulator");
 
     let mut depth_based_internal_aggregator_vec = Vec::new();
 
     for i in (0..additional_depth).rev() {
-        depth_based_internal_aggregator_vec.push(DepthBasedInternalAggregator::new(m, i, additional_depth, &proposal, public_keys.clone()));
+        let mut internal_leader_divider = 1;
+        if i == 0 {
+            internal_leader_divider = leader_divider;
+        }
+        depth_based_internal_aggregator_vec.push(DepthBasedInternalAggregator::new(m, i, additional_depth, &proposal, public_keys.clone(), internal_leader_divider));
     }
 
     // Set up validator connections.
@@ -59,21 +86,25 @@ pub(crate) async fn main() {
     let mut leaf_node = LeafNode::new(m, &proposal, public_keys.clone(), my_sig, agg_sig);
     leaf_node.connect().await;
 
-    // 200ms network
+    let mut network = 200;
 
     let mut leaf_aggregator = LeafAggregator::new(m, &proposal, public_keys.clone());
 
     // 200ms broadcast
+    network += 200;
+
     leaf_aggregator.connect().await;
 
     // 200ms network
+    network += 200;
 
     first_internal_aggregator.connect().await;
     for mut dep_based in depth_based_internal_aggregator_vec.iter_mut() {
         dep_based.connect().await;
-    }
 
-    // 200ms network
+        // 200ms network
+        network += 200;
+    }
 
     // Send out network messages of simulator for the validator to process.
     simulator.run().await;
@@ -92,7 +123,10 @@ pub(crate) async fn main() {
         println!("Now 4x: {}", time_now.elapsed().as_millis());
     }
 
+    let time_final = time_now.elapsed().as_millis() + network;
 
+    println!("Time final: {}", time_final);
+    
     // ----- Types of Roles: -----
     // Leaf node: Verifies initial proposal, signs it, and sends sig out (done)
     // Leaf aggregator: Collect leaf votes, aggregate and broadcast (done)
@@ -100,11 +134,6 @@ pub(crate) async fn main() {
     // Leader aggregator. Collect aggregates from others and join 2 aggregates that we've gotten. (done)
 
     // Leaf sends to 128 parents, one of them is real (simulator only has to create 127 now, we create a new validatortype for this that listens to the m input.)
-
-    //todo ethereum might've adjusted to weighted voting?
-
-    //todo: atm they all do public key aggregates for all 20 different groups, this is suuuuuper expensive.
-    //todo: Can we do sth about this? Think?
 
     //todo: Simulate average 1/3 byz case
 

@@ -10,9 +10,8 @@ use hmac::digest::typenum::Bit;
 use hmac::Mac;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc};
-use tokio::task;
-use crate::simulation::main::{HmacSha256, DST};
+use tokio::sync::{broadcast};
+use crate::simulation::main::{HmacSha256, DST, RUN_POOL};
 
 pub struct FirstInternalAggregator {
     // Fanout.
@@ -146,7 +145,7 @@ impl FirstInternalAggregator {
         println!("Got all the sigs {} {} {}", biggest_result_map.len(), overlap_bitvec_map.len(), overlap_calc_map.len());
 
         let proposal_copy = self.proposal.clone();
-        let biggest_future = task::spawn_blocking(move || {
+        let biggest_future = RUN_POOL.spawn_blocking(move || {
             // do some expensive computation
             let mut pub_vec = Vec::new();
             let mut sig_vec = Vec::new();
@@ -179,7 +178,7 @@ impl FirstInternalAggregator {
         }
 
         let proposal_copy2 = self.proposal.clone();
-        let overlap_future = task::spawn_blocking(move || {
+        let overlap_future = RUN_POOL.spawn_blocking(move || {
             // do some expensive computation
             let mut pub_vec = Vec::new();
             let mut sig_vec = Vec::new();
@@ -231,7 +230,7 @@ pub async fn connect_to_child_nodes(m: usize, base_port: usize, proposal: &Arc<V
     let public_keys_copy = public_keys.clone();
     let proposal_copy = proposal.clone();
     let m_copy = m.clone();
-    task::spawn(async move {
+    RUN_POOL.spawn(async move {
         loop {
             let mut rx = local_sender.subscribe();
             let port_string = port.to_string();
@@ -242,7 +241,7 @@ pub async fn connect_to_child_nodes(m: usize, base_port: usize, proposal: &Arc<V
             match listener.accept().await {
                 Ok((mut socket, address)) => {
 
-                    tokio::spawn(async move {
+                    RUN_POOL.spawn(async move {
                         // We atm only need a single connection per port here (saves us from having a lot of thread doing nothing).
 
                         // Wait before starting operation
@@ -322,7 +321,7 @@ pub async fn setup_parent_connections(base_port : usize, range: usize, sender: &
         // Spawn a task to accept connections on this listener
         let mut rx = sender.subscribe();
 
-        task::spawn(async move {
+        RUN_POOL.spawn(async move {
 
             let expected_mac = HmacSha256::new_from_slice(port_string.as_bytes());
             let mut unwrapped_mac = expected_mac.unwrap();

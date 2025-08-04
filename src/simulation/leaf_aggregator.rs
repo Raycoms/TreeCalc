@@ -8,7 +8,7 @@ use dashmap::{DashMap};
 use hmac::Mac;
 use rand_core::RngCore;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use crate::simulation::main::{HmacSha256, DST};
+use crate::simulation::main::{HmacSha256, DST, RUN_POOL};
 use tokio::net::{TcpStream};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task;
@@ -91,7 +91,7 @@ impl LeafAggregator {
             let local_public_keys = self.public_keys.clone();
             let sibling_signature_sender2_copy = sibling_signature_sender2.clone();
             let signature_receiver_copy = signature_receiver.clone();
-            tokio::spawn(async move {
+            RUN_POOL.spawn(async move {
                 while let Ok((id, sig)) = signature_receiver_copy.recv().await {
                     if sig.verify(false, &proposal, DST, &[], local_public_keys.get(id).unwrap(), false).eq(&BLST_SUCCESS) {
                         if leaf_sig_map_copy.insert(id.clone(), Some(sig.clone())).is_none() {
@@ -110,7 +110,7 @@ impl LeafAggregator {
             let sibling_sig_map_copy = self.signature_map.clone();
             let local_public_keys2 = self.public_keys.clone();
             let sibling_signature_receiver_copy = sibling_signature_receiver.clone();
-            tokio::spawn(async move {
+            RUN_POOL.spawn(async move {
                 while let Ok((id, sig)) = sibling_signature_receiver_copy.recv().await {
                     if !sibling_sig_map_copy.contains_key(&id) {
                         if sig.verify(false, &proposal2, DST, &[], local_public_keys2.get(id).unwrap(), false).eq(&BLST_SUCCESS) {
@@ -149,7 +149,7 @@ impl LeafAggregator {
         let pub_map_copy = self.public_keys.clone();
         let m_copy = self.m.clone();
         let tx2 = tx.clone();
-        task::spawn(async move {
+        RUN_POOL.spawn(async move {
             let time_now = Instant::now();
 
             loop {
@@ -188,7 +188,7 @@ impl LeafAggregator {
             let mut final_agg_sender_copy = final_agg_sender.clone();
             let m = self.m;
             //let proposal  = self.proposal.clone();
-            tokio::spawn(async move {
+            RUN_POOL.spawn(async move {
                 'task: loop {
                     match rx2.recv().await {
                         Ok(sigs) => {
@@ -257,7 +257,7 @@ pub async fn connect_to_leaf_nodes(base_port : usize, range: usize, signature_se
 
         // Spawn a task to accept connections on this listener
         let tx_clone = signature_sender.clone();
-        tokio::spawn(async move {
+        RUN_POOL.spawn(async move {
 
             // Wait to start reading messages.
             rx.recv().await.unwrap();
@@ -290,7 +290,7 @@ pub async fn setup_sibling_connection(base_port: usize, range: usize, sibling_si
         let (mut reader, mut writer) = stream.into_split();
         let map = Arc::new(DashMap::new());
         let map2 = map.clone();
-        task::spawn(async move {
+        RUN_POOL.spawn(async move {
             // We atm only need a single connection per port here (saves us from having a lot of thread doing nothing).
             // Awaiting sibling message.
             rx.recv().await.unwrap();
@@ -340,7 +340,7 @@ pub async fn setup_sibling_connection(base_port: usize, range: usize, sibling_si
         });
 
         let mut subscriber = sibling_broadcast_channel.subscribe();
-        task::spawn(async move {
+        RUN_POOL.spawn(async move {
             // Connect to sibling for sending.
             while let Ok((id, sig)) = subscriber.recv().await {
                 if map.insert(id, sig.clone()).is_none() {
@@ -358,7 +358,7 @@ pub async fn setup_sibling_connection(base_port: usize, range: usize, sibling_si
 
     let mut receiver_copy = sibling_signature_receiver2;
     // Spawn a task to accept connections on this listener
-    task::spawn(async move {
+    RUN_POOL.spawn(async move {
         // Connect to sibling for sending.
         while let Ok((id, sig)) = receiver_copy.recv().await {
             sibling_broadcast_channel.send((id, sig)).unwrap();
@@ -376,7 +376,7 @@ pub async fn setup_parent_connections(base_port : usize, range: usize, sender: &
         // Spawn a task to accept connections on this listener
         let mut rx = sender.subscribe();
 
-        task::spawn(async move {
+        RUN_POOL.spawn(async move {
 
             let expected_mac = HmacSha256::new_from_slice(port_string.as_bytes());
             let mut unwrapped_mac = expected_mac.unwrap();

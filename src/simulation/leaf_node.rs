@@ -6,7 +6,7 @@ use hmac::Mac;
 use log::info;
 use rand_core::RngCore;
 use tokio::io::{AsyncWriteExt};
-use crate::simulation::main::{ DST};
+use crate::simulation::main::{DST, RUN_POOL};
 use tokio::net::{TcpListener};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::Sender;
@@ -57,7 +57,7 @@ impl LeafNode {
             let share = self.public_keys.len()/4;
             let pubs_copy = self.public_keys.clone();
             let j = i.clone()*share;
-            handles.push(tokio::spawn(async move {
+            handles.push(RUN_POOL.spawn(async move {
                 let mut pub_vec = Vec::new();
                 for index in j..(j+share){
                     pub_vec.push(pubs_copy.get(index).unwrap().as_ref());
@@ -96,7 +96,7 @@ pub async fn setup_parent_connections(base_port : usize, range: usize, sender: &
         // Spawn a task to accept connections on this listener
         let mut rx2 = sender.subscribe();
 
-        task::spawn(async move {
+        RUN_POOL.spawn(async move {
             match listener.accept().await {
                 Ok((mut socket, addr)) => {
                     // Spawn a new task for each connection
@@ -116,7 +116,7 @@ pub async fn setup_parent_connections(base_port : usize, range: usize, sender: &
 
     let listener = TcpListener::bind(&addr).await.unwrap();
     let mut rx = sender.subscribe();
-    task::spawn(async move {
+    RUN_POOL.spawn(async move {
         // Spawn a task to accept connections on this listener
 
         match listener.accept().await {
