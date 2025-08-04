@@ -1,13 +1,13 @@
-use std::collections::{BTreeMap};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc};
 use async_channel::{Receiver, Sender};
 use bit_vec::BitVec;
 use blst::{byte};
 use blst::BLST_ERROR::BLST_SUCCESS;
-use blst::min_pk::{AggregatePublicKey, AggregateSignature, PublicKey, SecretKey, Signature};
-use fxhash::FxHashMap;
+use blst::min_pk::{AggregatePublicKey, AggregateSignature, PublicKey, Signature};
 use hmac::digest::typenum::Bit;
 use hmac::Mac;
+use rand::{thread_rng, Rng};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast};
@@ -83,66 +83,37 @@ impl FirstInternalAggregator {
         let m_copy = self.m.clone();
 
         let mut biggest_result_map: BTreeMap<usize, (BitVec, Signature, PublicKey)> = BTreeMap::new();
-
-        let mut all_message_map = FxHashMap::default();
-        let mut overlap_calc_map = FxHashMap::default();
-        let mut overlap_bitvec_map = FxHashMap::default();
+        let mut random_map: HashMap<usize, Vec<(BitVec, Signature, PublicKey)>> = HashMap::default();
 
         let mut runs = 0;
         while let Ok((idx, bit_vec, sig, pub_key)) = self.signature_receiver.recv().await {
             runs+=1;
 
             if let Some((local_bit_vec, local_sig, local_pub_key)) = biggest_result_map.get(&idx) {
-                //todo maybe cache this result if slow.
                 if bit_vec.count_ones() > local_bit_vec.count_ones() {
                     // If bigger insert.
+                    random_map.get_mut(&idx).unwrap().push((local_bit_vec.clone(), local_sig.clone(), local_pub_key.clone()));
                     biggest_result_map.insert(idx, (bit_vec.clone(), sig, pub_key));
+                }
+                else {
+                    random_map.get_mut(&idx).unwrap().push((bit_vec.clone(), sig, pub_key));
                 }
             } else {
                 biggest_result_map.insert(idx, (bit_vec.clone(), sig, pub_key));
 
-                let mut count_vec = Vec::new();
-                for bit in bit_vec.iter() {
-                    if bit {
-                        count_vec.push(1);
-                    }
-                    else {
-                        count_vec.push(0);
-                    }
-                }
-                overlap_calc_map.insert(idx, count_vec);
-                overlap_bitvec_map.insert(idx, BitVec::from_elem(bit_vec.len(), false));
-
-                let mut overlap_vec = Vec::new();
-                overlap_vec.push((bit_vec, sig, pub_key));
-                all_message_map.insert(idx, overlap_vec);
+                let mut vec = Vec::new();
+                vec.push((bit_vec.clone(), sig, pub_key));
+                random_map.insert(idx, vec);
 
                 continue
             }
-
-            if let Some((mut le_vec)) = all_message_map.get_mut(&idx) {
-                let count_vec = overlap_calc_map.get_mut(&idx).unwrap();
-                for (local_idx, bool) in bit_vec.iter().enumerate() {
-                    if bool {
-                        count_vec[local_idx] += 1;
-                        // If more than 2 thirds
-                        if count_vec[local_idx] > ((m_copy as f64)/3.0*2.0) as usize {
-                            overlap_bitvec_map.get_mut(&idx).unwrap().set(local_idx, bool);
-                        }
-                    }
-                }
-
-                // If bigger insert.
-                le_vec.push((bit_vec, sig, pub_key));
-            }
-
 
             if runs >= m_copy {
                 break;
             }
         }
 
-        println!("Got all the sigs {} {} {}", biggest_result_map.len(), overlap_bitvec_map.len(), overlap_calc_map.len());
+        println!("Got all the sigs {} {}", biggest_result_map.len(), random_map.len());
 
         let proposal_copy = self.proposal.clone();
         let biggest_future = RUN_POOL.spawn_blocking(move || {
@@ -166,24 +137,14 @@ impl FirstInternalAggregator {
             return (result_bit_vec, agg_sig, agg_pub);
         });
 
-        let mut overlap_result_map = BTreeMap::new();
-        for (idx, vec) in all_message_map {
-            for (bit_vec, sig, pub_key) in vec {
-                if bit_vec.clone().and(overlap_bitvec_map.get(&idx).unwrap()) {
-                    overlap_result_map.insert(idx, (bit_vec, sig, pub_key));
-                    // Already found one that matches.
-                    continue
-                }
-            }
-        }
-
         let proposal_copy2 = self.proposal.clone();
-        let overlap_future = RUN_POOL.spawn_blocking(move || {
+        let random_future = RUN_POOL.spawn_blocking(move || {
             // do some expensive computation
             let mut pub_vec = Vec::new();
             let mut sig_vec = Vec::new();
             let mut result_bit_vec = BitVec::new();
-            for (idx, (bit_vec, sig, pub_key)) in overlap_result_map.iter() {
+            for (idx, vec) in random_map.iter() {
+                let (bit_vec, sig, pub_key) = vec.get(thread_rng().gen_range(0..(vec.len()-1))).unwrap();
                 result_bit_vec.extend(bit_vec);
                 sig_vec.push(sig);
                 pub_vec.push(pub_key);
@@ -200,10 +161,9 @@ impl FirstInternalAggregator {
         });
 
         let (biggest_bit_vec, biggest_agg_sig, biggest_pub) = biggest_future.await.unwrap();
-        let (overlap_bit_vec, overlap_agg_sig, overlap_pub) = overlap_future.await.unwrap();
+        let (random_bit_vec, random_agg_sig, random_pub) = random_future.await.unwrap();
 
-
-        self.parent_channels.send((biggest_bit_vec, biggest_agg_sig, overlap_bit_vec, overlap_agg_sig)).unwrap();
+        self.parent_channels.send((biggest_bit_vec, biggest_agg_sig, random_bit_vec, random_agg_sig)).unwrap();
         self.parent_channels.closed().await;
     }
 

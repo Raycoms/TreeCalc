@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc};
 use std::time::Instant;
 use async_channel::{Receiver, Sender};
@@ -9,6 +9,7 @@ use blst::min_pk::{AggregatePublicKey, AggregateSignature, PublicKey, Signature}
 use fxhash::FxHashMap;
 use hmac::digest::typenum::Bit;
 use hmac::Mac;
+use rand::{thread_rng, Rng};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast};
@@ -106,10 +107,8 @@ impl DepthBasedInternalAggregator {
 
         let mut biggest_result_map: BTreeMap<usize, (BitVec, Signature, PublicKey, u64)> = BTreeMap::new();
 
-        let mut all_message_map = FxHashMap::default();
-        let mut overlap_calc_map = FxHashMap::default();
-        let mut overlap_bitvec_map = FxHashMap::default();
-
+        let mut random_map: HashMap<usize, Vec<(BitVec, Signature, PublicKey)>> = HashMap::default();
+        
         let mut total_time = 0;
         let mut setup_time = 0;
         let mut total_count_time = 0;
@@ -121,26 +120,15 @@ impl DepthBasedInternalAggregator {
                 let bit_vec_ones = bit_vec.count_ones();
                 if bit_vec_ones > *local_bit_vec_ones {
                     // If bigger insert.
-                    biggest_result_map.insert(idx, (bit_vec.clone(), sig, pub_key, bit_vec_ones));
+                    biggest_result_map.insert(idx, (bit_vec, sig, pub_key, bit_vec_ones));
                 }
+                random_map.get_mut(&idx).unwrap().push((bit_vec2, sig2, pub2));
             } else {
                 biggest_result_map.insert(idx, (bit_vec.clone(), sig, pub_key, bit_vec.count_ones()));
 
-                let mut count_vec = Vec::new();
-                for bit in bit_vec2.iter() {
-                    if bit {
-                        count_vec.push(1);
-                    }
-                    else {
-                        count_vec.push(0);
-                    }
-                }
-                overlap_calc_map.insert(idx, count_vec);
-                overlap_bitvec_map.insert(idx, BitVec::from_elem(bit_vec2.len(), false));
-
-                let mut overlap_vec = Vec::new();
-                overlap_vec.push((bit_vec2, sig2, pub2));
-                all_message_map.insert(idx, overlap_vec);
+                let mut vec = Vec::new();
+                vec.push((bit_vec2.clone(), sig2, pub2));
+                random_map.insert(idx, vec);
 
                 total_time+=time_now.elapsed().as_millis();
                 if runs >= m_copy {
@@ -151,45 +139,15 @@ impl DepthBasedInternalAggregator {
                 continue
             }
 
-            //todo multithread
-            //todo: store matrix as matrix in memory and then rea dcolumn and use bitwise magic.
-            if let Some((mut le_vec)) = all_message_map.get_mut(&idx) {
-                let count_vec = overlap_calc_map.get_mut(&idx).unwrap();
-                let count_time = Instant::now();
-
-                let mut index = 0;
-                for subtype in bit_vec2.storage().iter() {
-                    for i in (0..32).rev() {
-                        let bit = (subtype >> i) & 1;
-                        if bit != 0 {
-                            count_vec[i + (index * 32)] += 1;
-                        }
-                    }
-                    index += 1;
-                }
-                total_count_time+=count_time.elapsed().as_millis();
-                // If bigger insert.
-                le_vec.push((bit_vec2, sig2, pub2));
-            }
-
             total_time+=time_now.elapsed().as_millis();
             if runs >= m_copy {
                 break;
             }
         }
 
-        let time_now_1 = Instant::now();
-        for (local_idx, count_vec) in overlap_calc_map {
-            // If more than 2 thirds
-            if count_vec[local_idx] > ((m_copy as f64)/3.0*2.0) as usize {
-                overlap_bitvec_map.get_mut(&local_idx).unwrap().set(local_idx, true);
-            }
-        }
-        println!("took {}", time_now_1.elapsed().as_millis());
-
         let time_now = Instant::now();
 
-        println!("Got all the sigs {} {} at depth {} total time {} {} {}", biggest_result_map.len(), overlap_bitvec_map.len(), self.depth, total_time, setup_time, total_count_time);
+        println!("Got all the sigs {} at depth {} total time {} {} {}", biggest_result_map.len(), self.depth, total_time, setup_time, total_count_time);
         let proposal_copy = self.proposal.clone();
         let biggest_future = RUN_POOL.spawn_blocking(move || {
             // do some expensive computation
@@ -211,24 +169,17 @@ impl DepthBasedInternalAggregator {
             return (agg_sig, agg_pub, biggest_result_map);
         });
 
-        //todo we might find none, then take largest.
-        let mut overlap_result_map = BTreeMap::new();
-        for (idx, vec) in all_message_map {
-            for (bit_vec, sig, pub_key) in vec {
-                if bit_vec.clone().and(overlap_bitvec_map.get(&idx).unwrap()) {
-                    overlap_result_map.insert(idx, (bit_vec, sig, pub_key));
-                    // Already found one that matches.
-                    break
-                }
-            }
-        }
-
         let proposal_copy2 = self.proposal.clone();
-        let overlap_future = RUN_POOL.spawn_blocking(move || {
+        let random_future = RUN_POOL.spawn_blocking(move || {
             // do some expensive computation
             let mut pub_vec = Vec::new();
             let mut sig_vec = Vec::new();
-            for (idx, (bit_vec, sig, pub_key)) in overlap_result_map.iter() {
+            let mut random_bit_vec= BitVec::new();
+            for (idx, vec) in random_map.iter() {
+                let (bit_vec, sig, pub_key) = vec.get(thread_rng().gen_range(0..(vec.len()-1))).unwrap();
+
+                random_bit_vec.append(&mut bit_vec.clone());
+
                 sig_vec.push(sig);
                 pub_vec.push(pub_key);
             }
@@ -238,30 +189,25 @@ impl DepthBasedInternalAggregator {
             let agg_sig = AggregateSignature::aggregate(&sig_vec, false).unwrap().to_signature();
 
             //not necessary.
-            //if !agg_sig.verify(false, &proposal_copy2, DST, &[], &agg_pub, false).eq(&BLST_SUCCESS) {
+            // if !agg_sig.verify(false, &proposal_copy2, DST, &[], &agg_pub, false).eq(&BLST_SUCCESS) {
             //    panic!("Failed to verify agg signature");
-            //}
-            return (agg_sig, agg_pub, overlap_result_map);
+            // }
+            return (agg_sig, agg_pub, random_bit_vec);
         });
 
         let ( biggest_agg_sig, biggest_pub, biggest_result_map) = biggest_future.await.unwrap();
-        let ( overlap_agg_sig, overlap_pub, overlap_result_map) = overlap_future.await.unwrap();
+        let (random_agg_sig, random_pub, random_bit_vec) = random_future.await.unwrap();
 
         let mut biggest_bit_vec = BitVec::new();
         for (idx, (mut bit_vec, sig, pub_key, ones)) in biggest_result_map.into_iter() {
             biggest_bit_vec.append(&mut bit_vec);
         }
 
-        let mut overlap_bit_vec = BitVec::new();
-        for (idx, (mut bit_vec, sig, pub_key)) in overlap_result_map.into_iter() {
-            overlap_bit_vec.append(&mut bit_vec);
-        }
-
         println!("Finalized at: {}", time_now.elapsed().as_millis());
 
         // Leader has no further parent.
         if self.depth != 0 {
-            self.parent_channels.send((biggest_bit_vec, biggest_agg_sig, overlap_bit_vec, overlap_agg_sig)).unwrap();
+            self.parent_channels.send((biggest_bit_vec, biggest_agg_sig, random_bit_vec, random_agg_sig)).unwrap();
             self.parent_channels.closed().await;
         }
     }
