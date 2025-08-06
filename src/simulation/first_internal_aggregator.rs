@@ -127,14 +127,14 @@ impl FirstInternalAggregator {
                 pub_vec.push(pub_key);
             }
 
-            let agg_pub = AggregatePublicKey::aggregate(&pub_vec, false).unwrap().to_public_key();
+            // let agg_pub = AggregatePublicKey::aggregate(&pub_vec, false).unwrap().to_public_key();
             let agg_sig = AggregateSignature::aggregate(&sig_vec, false).unwrap().to_signature();
 
             //disable, not necessary.
             //if !agg_sig.verify(false, &proposal_copy, DST, &[], &agg_pub, false).eq(&BLST_SUCCESS) {
             //    panic!("Failed to verify agg signature");
             //}
-            return (result_bit_vec, agg_sig, agg_pub);
+            return (result_bit_vec, agg_sig);
         });
 
         let proposal_copy2 = self.proposal.clone();
@@ -150,18 +150,18 @@ impl FirstInternalAggregator {
                 pub_vec.push(pub_key);
             }
 
-            let agg_pub = AggregatePublicKey::aggregate(&pub_vec, false).unwrap().to_public_key();
+            // let agg_pub = AggregatePublicKey::aggregate(&pub_vec, false).unwrap().to_public_key();
             let agg_sig = AggregateSignature::aggregate(&sig_vec, false).unwrap().to_signature();
 
             //disable, not necessary.
             //if !agg_sig.verify(false, &proposal_copy2, DST, &[], &agg_pub, false).eq(&BLST_SUCCESS) {
             //    panic!("Failed to verify agg signature");
             //}
-            return (result_bit_vec, agg_sig, agg_pub);
+            return (result_bit_vec, agg_sig);
         });
 
-        let (biggest_bit_vec, biggest_agg_sig, biggest_pub) = biggest_future.await.unwrap();
-        let (random_bit_vec, random_agg_sig, random_pub) = random_future.await.unwrap();
+        let (biggest_bit_vec, biggest_agg_sig) = biggest_future.await.unwrap();
+        let (random_bit_vec, random_agg_sig) = random_future.await.unwrap();
 
         self.parent_channels.send((biggest_bit_vec, biggest_agg_sig, random_bit_vec, random_agg_sig)).unwrap();
         self.parent_channels.closed().await;
@@ -171,7 +171,7 @@ impl FirstInternalAggregator {
     pub async fn kill(&mut self) {
         // Send command to close channels and connections to all channels in all channel types.
         // Send out the leaf votes.
-        let _ = self.child_channels.send(());
+        self.child_channels.send(()).unwrap();
     }
 }
 
@@ -191,7 +191,7 @@ pub async fn connect_to_child_nodes(m: usize, base_port: usize, proposal: &Arc<V
     let proposal_copy = proposal.clone();
     let m_copy = m.clone();
     RUN_POOL.spawn(async move {
-        loop {
+        for _ in 0..m_copy {
             let mut rx = local_sender.subscribe();
             let port_string = port.to_string();
             let local_sender_copy = sender_copy.clone();

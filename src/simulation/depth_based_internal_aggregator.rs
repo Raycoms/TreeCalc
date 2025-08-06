@@ -6,7 +6,7 @@ use bit_vec::BitVec;
 use blst::{byte};
 use blst::BLST_ERROR::BLST_SUCCESS;
 use blst::min_pk::{AggregatePublicKey, AggregateSignature, PublicKey, Signature};
-use fxhash::FxHashMap;
+use dashmap::DashMap;
 use hmac::digest::typenum::Bit;
 use hmac::Mac;
 use rand::{thread_rng, Rng};
@@ -73,7 +73,7 @@ impl DepthBasedInternalAggregator {
 
         let expected_sigs = (self.m / 16).pow((self.total_depth - self.depth) as u32) * self.m;
         println!("Expected sigs: {} at {} at {}", expected_sigs, self.depth, base_port);
-        connect_to_child_nodes(base_port, &self.proposal, &self.public_keys, &mut self.child_channels, signature_sender, expected_sigs).await;
+        connect_to_child_nodes(self.m, base_port, &self.proposal, &self.public_keys, &mut self.child_channels, signature_sender, expected_sigs).await;
         self.signature_receiver=signature_receiver;
 
         println!("Finished preparing internal aggregator connections");
@@ -159,14 +159,14 @@ impl DepthBasedInternalAggregator {
             }
 
             println!("Size 1: {} {}", pub_vec.len(), sig_vec.len());
-            let agg_pub = AggregatePublicKey::aggregate(&pub_vec, false).unwrap().to_public_key();
+            // let agg_pub = AggregatePublicKey::aggregate(&pub_vec, false).unwrap().to_public_key();
             let agg_sig = AggregateSignature::aggregate(&sig_vec, false).unwrap().to_signature();
 
             // not necessary.
             // if !agg_sig.verify(false, &proposal_copy, DST, &[], &agg_pub, false).eq(&BLST_SUCCESS) {
             //    panic!("Failed to verify agg signature");
-            //}
-            return (agg_sig, agg_pub, biggest_result_map);
+            // }
+            return (agg_sig, biggest_result_map);
         });
 
         let proposal_copy2 = self.proposal.clone();
@@ -185,18 +185,18 @@ impl DepthBasedInternalAggregator {
             }
 
             println!("Size 2: {} {}", pub_vec.len(), sig_vec.len());
-            let agg_pub = AggregatePublicKey::aggregate(&pub_vec, false).unwrap().to_public_key();
+            //let agg_pub = AggregatePublicKey::aggregate(&pub_vec, false).unwrap().to_public_key();
             let agg_sig = AggregateSignature::aggregate(&sig_vec, false).unwrap().to_signature();
 
-            //not necessary.
+            // not necessary.
             // if !agg_sig.verify(false, &proposal_copy2, DST, &[], &agg_pub, false).eq(&BLST_SUCCESS) {
             //    panic!("Failed to verify agg signature");
             // }
-            return (agg_sig, agg_pub, random_bit_vec);
+            return (agg_sig, random_bit_vec);
         });
 
-        let ( biggest_agg_sig, biggest_pub, biggest_result_map) = biggest_future.await.unwrap();
-        let (random_agg_sig, random_pub, random_bit_vec) = random_future.await.unwrap();
+        let ( biggest_agg_sig, biggest_result_map) = biggest_future.await.unwrap();
+        let (random_agg_sig, random_bit_vec) = random_future.await.unwrap();
 
         let mut biggest_bit_vec = BitVec::new();
         for (idx, (mut bit_vec, sig, pub_key, ones)) in biggest_result_map.into_iter() {
@@ -221,7 +221,7 @@ impl DepthBasedInternalAggregator {
 }
 
 // connect to m child nodes. So we assume they're al
-pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>, public_keys: &Arc<Vec<Arc<PublicKey>>>, sender: &broadcast::Sender<()>, signature_sender: Sender<(usize, BitVec, Signature, PublicKey, BitVec, Signature, PublicKey)>, expected_sigs: usize) {
+pub async fn connect_to_child_nodes(m: usize, base_port: usize, proposal: &Arc<Vec<byte>>, public_keys: &Arc<Vec<Arc<PublicKey>>>, sender: &broadcast::Sender<()>, signature_sender: Sender<(usize, BitVec, Signature, PublicKey, BitVec, Signature, PublicKey)>, expected_sigs: usize) {
 
     println!("Opening Port: {}", base_port);
 
@@ -231,20 +231,24 @@ pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>,
     let listener = TcpListener::bind(&addr).await.unwrap();
     let mut local_sender = sender.clone();
 
+    let map = Arc::new(DashMap::new());
+
     let sender_copy = signature_sender.clone();
     let public_keys_copy = public_keys.clone();
     let proposal_copy = proposal.clone();
 
     let expected_sigs_copy : usize = expected_sigs.clone();
+    let m_copy = m.clone();
 
     RUN_POOL.spawn(async move {
-        loop {
+        for _ in 0..m_copy {
             let mut rx = local_sender.subscribe();
             let port_string = port.to_string();
             let local_sender_copy = sender_copy.clone();
             let local_public_keys_copy = public_keys_copy.clone();
             let local_proposal_copy = proposal_copy.clone();
             let local_expected_sigs = expected_sigs_copy.clone();
+            let map = map.clone();
             match listener.accept().await {
                 Ok((mut socket, address)) => {
 
@@ -303,34 +307,67 @@ pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>,
                             println!("Invalid Mac from {}", address);
                         } else {
 
-                            let mut pubs = Vec::new();
                             let start_index = group_id * local_expected_sigs;
-                            for (local_index, available) in bit_vec.iter().enumerate() {
-                                if available {
+                            if !map.contains_key(&group_id) {
+                                let mut pubs = Vec::new();
+
+                                for local_index in 0..bit_vec.len() {
                                     let index = start_index + local_index;
                                     pubs.push(local_public_keys_copy.get(index).unwrap().as_ref());
                                 }
+                                let pub_key = AggregatePublicKey::aggregate(&pubs, false).unwrap();
+                                map.insert(group_id, pub_key);
                             }
-                            let pub_key = AggregatePublicKey::aggregate(&pubs, false).unwrap().to_public_key();
 
-                            let mut pubs2 = Vec::new();
-                            for (local_index, available) in bit_vec2.iter().enumerate() {
-                                if available {
+                            // Participation modifier for cost calculation. It's 6 for 2/3 participation and 20 for 9/10
+                            let participation_modifier = 6;
+
+                            let mut agg_pub = map.get(&group_id).unwrap().clone();
+
+                            // Now here we do subtract instead of add!
+                            let start_index = group_id * local_expected_sigs;
+                            for (local_index, available) in bit_vec.iter().enumerate() {
+                                // This is probably never used atm. I need to drop pubs somewhere.
+                                if !available || local_index % participation_modifier == 0 {
                                     let index = start_index + local_index;
-                                    pubs2.push(local_public_keys_copy.get(index).unwrap().as_ref());
+                                    agg_pub.add_public_key(&invert_pub(local_public_keys_copy.get(index).unwrap()), false).unwrap();
                                 }
                             }
-                            let pub_key2 = AggregatePublicKey::aggregate(&pubs2, false).unwrap().to_public_key();
+
+                            for (local_index, available) in bit_vec.iter().enumerate() {
+                                // This is probably never used atm. I need to drop pubs somewhere.
+                                if local_index % participation_modifier == 0 {
+                                    let index = start_index + local_index;
+                                    agg_pub.add_public_key(local_public_keys_copy.get(index).unwrap(), false).unwrap();
+                                }
+                            }
+
+                            let mut pub_key2 = map.get(&group_id).unwrap().clone();
+
+                            for (local_index, available) in bit_vec2.iter().enumerate() {
+                                // This is probably never used atm. I need to drop pubs somewhere.
+                                if !available || local_index % participation_modifier == 0 {
+                                    let index = start_index + local_index;
+                                    pub_key2.add_public_key(&invert_pub(local_public_keys_copy.get(index).unwrap()), false).unwrap();
+                                }
+                            }
+
+                            for (local_index, available) in bit_vec2.iter().enumerate() {
+                                // This is probably never used atm. I need to drop pubs somewhere.
+                                if local_index % participation_modifier == 0 {
+                                    let index = start_index + local_index;
+                                    pub_key2.add_public_key(local_public_keys_copy.get(index).unwrap(), false).unwrap();
+                                }
+                            }
 
                             // This verify is only necessary in the worst case here. For a best/avg-case simulation we can drop this.
-                            if sig.verify(false, &local_proposal_copy, DST, &[], &pub_key, false).eq(&BLST_SUCCESS) {
-                                if sig2.verify(false, &local_proposal_copy, DST, &[], &pub_key2, false).eq(&BLST_SUCCESS) {
-                                    local_sender_copy.send((group_id, bit_vec, sig, pub_key, bit_vec2, sig2, pub_key2)).await.unwrap();
+                            if sig.verify(false, &local_proposal_copy, DST, &[], &agg_pub.to_public_key(), false).eq(&BLST_SUCCESS) {
+                                if sig2.verify(false, &local_proposal_copy, DST, &[], &pub_key2.to_public_key(), false).eq(&BLST_SUCCESS) {
+                                    local_sender_copy.send((group_id, bit_vec, sig, agg_pub.to_public_key(), bit_vec2, sig2, pub_key2.to_public_key())).await.unwrap();
                                 } else {
                                     println!("DBI2: Invalid Sig from {}", address);
                                 }
                             } else {
-                                //todo not working?  
                                 println!("DBI1: Invalid Sig from {}", address);
                             }
                         }
@@ -347,6 +384,15 @@ pub async fn connect_to_child_nodes(base_port: usize, proposal: &Arc<Vec<byte>>,
     });
 }
 
+pub fn invert_pub(pk: &PublicKey) -> PublicKey {
+    let affine: &blst::blst_p1_affine = pk.into();
+    let mut p1 = blst::blst_p1::default();
+    unsafe { blst::blst_p1_from_affine(&mut p1, affine) };
+    unsafe { blst::blst_p1_cneg(&mut p1, true) };
+    let mut neg_affine = blst::blst_p1_affine::default();
+    unsafe { blst::blst_p1_to_affine(&mut neg_affine, &p1) };
+    PublicKey::from(neg_affine)
+}
 
 pub async fn setup_parent_connections(base_port : usize, range: usize, sender: &mut broadcast::Sender<(BitVec, Signature, BitVec, Signature)>) {
     for i in 0..range {

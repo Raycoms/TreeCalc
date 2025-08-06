@@ -21,6 +21,7 @@ pub struct LeafNode {
     pub my_sig: Signature,
     pub agg_sig: Signature,
     pub parent_channels: broadcast::Sender<(Signature)>,
+    pub pub_cache: Vec<AggregatePublicKey>,
 }
 
 impl LeafNode {
@@ -36,7 +37,8 @@ impl LeafNode {
             public_keys: Arc::new(public_keys),
             my_sig,
             agg_sig,
-            parent_channels: Sender::new(2)
+            parent_channels: Sender::new(2),
+            pub_cache: Vec::new(),
         }
     }
 
@@ -46,24 +48,57 @@ impl LeafNode {
         // We set up connections for: parent nodes.
         setup_parent_connections(10_000, self.m, &mut self.parent_channels).await;
         println!("Finished preparing leaf connections");
+
+        for i in 0..4 {
+            let share = self.public_keys.len()/4;
+            let pubs_copy = self.public_keys.clone();
+            let j = i.clone()*share;
+            let mut pub_vec = Vec::new();
+            for index in j..(j+share){
+                pub_vec.push(pubs_copy.get(index).unwrap().as_ref());
+            }
+
+            self.pub_cache.push(AggregatePublicKey::aggregate(&pub_vec, false).unwrap());
+        }
     }
 
     // Run simulator by notifying all threads to send the message to the client.
     pub async fn run(&mut self) {
         println!("Starting up Leaf node");
 
+        self.verify().await;
+        self.verify().await;
+
+        self.parent_channels.send(self.my_sig.clone()).unwrap();
+        println!("Awaiting sending proposal");
+        self.parent_channels.closed().await;
+    }
+
+    pub async fn verify(&mut self) {
         let mut handles = Vec::new();
+
+        // Participation modifier for cost calculation. It's 6 for 2/3 participation and 20 for 9/10
+        let participation_modifier = 6;
+
         for i in 0..4 {
             let share = self.public_keys.len()/4;
+            let mut pubs_cache_copy = self.pub_cache.get(i).unwrap().clone();
             let pubs_copy = self.public_keys.clone();
+
             let j = i.clone()*share;
             handles.push(RUN_POOL.spawn(async move {
-                let mut pub_vec = Vec::new();
-                for index in j..(j+share){
-                    pub_vec.push(pubs_copy.get(index).unwrap().as_ref());
+                for index in j..(j+share) {
+                    if index % participation_modifier == 0 {
+                        pubs_cache_copy.add_public_key(&crate::simulation::depth_based_internal_aggregator::invert_pub(pubs_copy.get(index).unwrap()), false).unwrap();
+                    }
                 }
 
-                AggregatePublicKey::aggregate(&pub_vec, false).unwrap().to_public_key()
+                for index in j..(j+share) {
+                    if index % participation_modifier == 0 {
+                        pubs_cache_copy.add_public_key(pubs_copy.get(index).unwrap(), false).unwrap();
+                    }
+                }
+                pubs_cache_copy.to_public_key()
             }));
         }
 
@@ -79,12 +114,10 @@ impl LeafNode {
 
         // This is the same proposal we're signing, but that's okay. It's just for complexity sake.
         if !self.agg_sig.verify(false, &self.proposal, DST, &[], &agg_pub, false).eq(&BLST_SUCCESS) {
-           panic!("Failed to verify agg signature");
+            panic!("Failed to verify agg signature");
         }
-        self.parent_channels.send(self.my_sig.clone()).unwrap();
-        println!("Awaiting sending proposal");
-        self.parent_channels.closed().await;
     }
+
 }
 
 pub async fn setup_parent_connections(base_port : usize, range: usize, sender: &mut Sender<(Signature)>) {

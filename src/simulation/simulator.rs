@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
-use futures::SinkExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
@@ -25,7 +24,6 @@ pub struct Simulator {
     // Proposal byte vector.
     pub proposal: Vec<byte>,
     pub leaf_channels: broadcast::Sender<()>,
-    pub sibling_channels: broadcast::Sender<()>,
     pub parent_channels: broadcast::Sender<()>,
     pub leaf_parent_channels: broadcast::Sender<()>,
     pub consensus_data: Arc<HashMap<usize, Vec<(PublicKey, Signature, BitVec)>>>,
@@ -41,14 +39,13 @@ impl Simulator {
             leader_divider,
             proposal: proposal.clone(),
             leaf_channels: broadcast::channel(2).0,
-            sibling_channels: broadcast::channel(2).0,
             parent_channels: broadcast::channel(2).0,
             leaf_parent_channels: broadcast::channel(2).0,
             consensus_data: Arc::new(HashMap::new()),
         }
     }
 
-    pub async fn open_connections(&mut self) -> (Vec<Arc<PublicKey>>, Signature, Signature) {
+    pub async fn init(&mut self) -> (Vec<Arc<PublicKey>>, Signature, Signature, Arc<Vec<Signature>>) {
         // We set up connections for: Leaf nodes, siblings & parent nodes.
         let mut pub_keys = Vec::new();
 
@@ -168,24 +165,22 @@ impl Simulator {
         }
 
         let agg_sig = AggregateSignature::aggregate(&sigs, false).unwrap().to_signature();
+        self.consensus_data = Arc::new(agg_map);
 
         println!("Finished Aggregation, Opening Connections");
+        (Vec::from(pub_keys), agg_sig, sig_vec.get(0).unwrap().clone(), sig_vec)
+    }
 
+    pub async fn open_connections(&mut self, sig_vec: &Arc<Vec<Signature>>) {
 
         // Leaf nodes will send out messages to their parent
-        setup_leaf_nodes(self, 10_000, self.m-1, &sig_vec).await;
+        setup_leaf_nodes(self, 10_000, self.m-1, sig_vec).await;
         println!("Finished preparing Simulator leaf connections");
-
-        setup_sibling_connection(20_000, 127, &sig_vec, self.m, &mut self.sibling_channels).await;
-        println!("Finished preparing Simulator sibling connections");
 
         setup_parent_connections(30_000, 127, &mut self.parent_channels).await;
         println!("Finished preparing Simulator parent connections");
 
-
-        self.consensus_data = Arc::new(agg_map);
-
-        for i in 0..self.depth {
+        for i in 1..self.depth {
             let base_port = 40_000 + 2000 * i;
             setup_parent_connections(base_port, 127, &mut self.parent_channels).await;
         }
@@ -195,8 +190,6 @@ impl Simulator {
 
         // Sleep a sec and let the thread creation and listener creation finish.
         sleep(Duration::from_secs(1));
-
-        (Vec::from(pub_keys), agg_sig, sig_vec.get(0).unwrap().clone())
     }
 
     // Run simulator by notifying all threads to send the message to the client.
@@ -204,12 +197,9 @@ impl Simulator {
         // Send out the leaf votes.
         self.leaf_channels.send(()).unwrap();
 
-        // Send out the sibling votes.
-        self.sibling_channels.send(()).unwrap();
-
         setup_leaf_parent_connections( 11_000, self.m - 1, &mut self.leaf_parent_channels).await;
 
-        setup_children_connections(&self,30_000, self.m - 1).await;
+        setup_children_connections(&self,30_000, self.m).await;
 
         for i in 0..self.depth {
             let base_port = 40_000 + 2000 * i;
@@ -227,7 +217,6 @@ impl Simulator {
     pub async fn kill(&mut self) {
         // Send command to close channels and connections to all channels in all channel types.
         self.leaf_channels.send(()).unwrap();
-        self.sibling_channels.send(()).unwrap();
         self.parent_channels.send(()).unwrap();
         self.leaf_parent_channels.send(()).unwrap();
     }
@@ -267,58 +256,6 @@ pub async fn setup_leaf_nodes(
     }
 }
 
-pub async fn setup_sibling_connection(
-    base_port: usize,
-    range: usize,
-    port_to_sig_map: &Arc<Vec<Signature>>,
-    m: usize,
-    sender: &broadcast::Sender<()>,
-) {
-    for i in 0..range {
-        let port = base_port + i + 1;
-        let addr = format!("127.0.0.1:{}", port);
-        let listener = TcpListener::bind(&addr).await.unwrap();
-
-        let mut rx = sender.subscribe();
-
-        // Spawn a task to accept connections on this listener
-        let local_port_to_sig = port_to_sig_map.clone();
-        PREPARE_POOL.spawn(async move {
-            // We atm only need a single connection per port here (saves us from having a lot of thread doing nothing).
-            match listener.accept().await {
-                Ok((mut socket, addr)) => {
-                    let port_string_bytes = port.to_string();
-                    rx.recv().await.unwrap();
-
-                    for id in 0..m {
-                        let sig = local_port_to_sig.get(id).unwrap();
-                        let sig_bytes = sig.to_bytes();
-
-                        let mut mac = HmacSha256::new_from_slice(port_string_bytes.as_bytes());
-                        let mut unwrapped_mac = mac.unwrap();
-                        unwrapped_mac.update(&sig_bytes);
-                        let vote = unwrapped_mac.finalize().into_bytes();
-
-                        // Send MAC
-                        socket.write(&vote.to_vec()).await.unwrap();
-
-                        socket.write(&id.to_be_bytes()).await.unwrap();
-
-                        // Send vote
-                        socket.write(&sig_bytes).await.unwrap();
-                    }
-
-                    // keep channel open to receive the sibling broadcast.
-                    rx.recv().await.unwrap();
-                }
-                Err(e) => {
-                    eprintln!("Failed to accept connection: {}", e);
-                }
-            }
-        });
-    }
-}
-
 pub async fn setup_parent_connections(
     base_port: usize,
     range: usize,
@@ -334,6 +271,8 @@ pub async fn setup_parent_connections(
 
         // Spawn a task to accept connections on this listener
         PREPARE_POOL.spawn(async move {
+            let listener = listener;
+
             // We atm only need a single connection per port here (saves us from having a lot of thread doing nothing).
             match listener.accept().await {
                 Ok((socket, addr)) => {
@@ -351,7 +290,7 @@ pub async fn setup_parent_connections(
 pub async fn setup_children_connections(simulator: &Simulator, base_port: usize, range: usize) {
 
     // We have m-1 connections. Each of them sends a signature aggregate. 20 distinct ones. The first one we already did!
-    for i in 1..(range+1) {
+    for i in 1..range {
         let port = base_port;
         let addr = format!("127.0.0.1:{}", port);
         let mut stream = TcpStream::connect(&addr).await.unwrap();
