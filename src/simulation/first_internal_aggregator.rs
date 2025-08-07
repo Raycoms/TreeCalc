@@ -27,7 +27,8 @@ pub struct FirstInternalAggregator {
     // Public keys of all nodes in the system.
     pub public_keys: Arc<Vec<Arc<PublicKey>>>,
     // Channel to hand signatures that come from the children and process them.
-    pub signature_receiver: Receiver<(usize,BitVec, Signature, PublicKey)>
+    pub signature_receiver: Receiver<(usize,BitVec, Signature, PublicKey)>,
+    pub ip : String
 }
 
 impl Default for FirstInternalAggregator {
@@ -40,18 +41,20 @@ impl Default for FirstInternalAggregator {
             parent_channels: broadcast::Sender::new(2),
             public_keys: Arc::new(Vec::new()),
             signature_receiver: async_channel::unbounded().1,
+            ip: "127.0.0.1".to_string()
         }
     }
 }
 
 impl FirstInternalAggregator {
 
-    pub fn new(m: usize, depth: usize, proposal: &Vec<u8>, public_keys: Vec<Arc<PublicKey>>) -> Self {
+    pub fn new(m: usize, depth: usize, proposal: &Vec<u8>, public_keys: Vec<Arc<PublicKey>>, ip: &String) -> Self {
         FirstInternalAggregator {
             m,
             depth,
             proposal: Arc::new(proposal.clone()),
             public_keys: Arc::new(public_keys),
+            ip: ip.clone(),
             ..Default::default()
         }
     }
@@ -59,7 +62,7 @@ impl FirstInternalAggregator {
     pub async fn open_connections(&mut self) {
 
         let (signature_sender, signature_receiver) = async_channel::bounded(self.m);
-        connect_to_child_nodes(self.m, 30_000, &self.proposal, &self.public_keys, &mut self.child_channels, signature_sender).await;
+        connect_to_child_nodes(self.ip.clone(), self.m, 30_000, &self.proposal, &self.public_keys, &mut self.child_channels, signature_sender).await;
         self.signature_receiver=signature_receiver;
 
         println!("Finished preparing internal aggregator connections");
@@ -69,7 +72,7 @@ impl FirstInternalAggregator {
     pub async fn connect(&mut self) {
         let base_port = 40_000 + (self.depth - 1) * 2000;
         // Currently just leader, in the future this has to be a setting.
-        setup_parent_connections(base_port, 128, &mut self.parent_channels).await;
+        setup_parent_connections(self.ip.clone(), base_port, 128, &mut self.parent_channels).await;
     }
 
     // Run simulator by notifying all threads to send the message to the client.
@@ -176,11 +179,11 @@ impl FirstInternalAggregator {
 }
 
 // connect to m child nodes. So we assume they're al
-pub async fn connect_to_child_nodes(m: usize, base_port: usize, proposal: &Arc<Vec<byte>>, public_keys: &Arc<Vec<Arc<PublicKey>>>, sender: &broadcast::Sender<()>, signature_sender: Sender<(usize, BitVec, Signature, PublicKey)>) {
+pub async fn connect_to_child_nodes(ip: String, m: usize, base_port: usize, proposal: &Arc<Vec<byte>>, public_keys: &Arc<Vec<Arc<PublicKey>>>, sender: &broadcast::Sender<()>, signature_sender: Sender<(usize, BitVec, Signature, PublicKey)>) {
 
     // Listen on base port for connection attempts.
     let port = base_port;
-    let addr = format!("127.0.0.1:{}", port);
+    let addr = format!("{}:{}", ip, port);
     let listener = TcpListener::bind(&addr).await.unwrap();
 
     println!("Listening on {}", addr);
@@ -271,10 +274,10 @@ pub async fn connect_to_child_nodes(m: usize, base_port: usize, proposal: &Arc<V
 }
 
 
-pub async fn setup_parent_connections(base_port : usize, range: usize, sender: &mut broadcast::Sender<(BitVec, Signature, BitVec, Signature)>) {
+pub async fn setup_parent_connections(ip: String, base_port : usize, range: usize, sender: &mut broadcast::Sender<(BitVec, Signature, BitVec, Signature)>) {
     for i in 0..range {
         let port = base_port + i;
-        let addr = format!("127.0.0.1:{}", port);
+        let addr = format!("{}:{}", ip, port);
         let mut stream = TcpStream::connect(&addr).await.unwrap();
         let port_string = port.to_string();
 

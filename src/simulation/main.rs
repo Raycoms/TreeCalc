@@ -1,5 +1,6 @@
 use std::thread::sleep;
 use std::time::{Duration, Instant};
+use get_if_addrs::get_if_addrs;
 use hmac::Hmac;
 use once_cell::sync::Lazy;
 use rand_core::{OsRng, RngCore};
@@ -39,8 +40,17 @@ pub(crate) static PREPARE_POOL: Lazy<Runtime> = Lazy::new(|| {
 
 pub(crate) async fn main() {
 
-    //todo optimization:
-    // -> Leaf nodes cache public key aggregate and subtract!
+    let mut ip: String = "127.0.0.1".parse().unwrap();
+    for iface in get_if_addrs().unwrap() {
+        if iface.name == "eth0" {
+            if let std::net::IpAddr::V4(ipv4) = iface.ip() {
+                ip = iface.ip().to_string()
+                // You can now use this IP for binding or logging
+            }
+        }
+    }
+
+    println!("Starting simulation {}", ip);
 
     // 2560000 (2.5m) Leaf nodes
     // 320 fanout
@@ -65,7 +75,7 @@ pub(crate) async fn main() {
     let mut proposal = vec![0u8; 100_000];
     OsRng.fill_bytes(&mut proposal);
 
-    let mut simulator = Simulator::new(m, additional_depth, &proposal, leader_divider);
+    let mut simulator = Simulator::new(m, additional_depth, &proposal, leader_divider, &ip);
     let (public_keys, agg_sig, my_sig, sig_vec) = simulator.init().await;
 
     let mut final_time = 0;
@@ -80,22 +90,22 @@ pub(crate) async fn main() {
             if i == 0 {
                 internal_leader_divider = leader_divider;
             }
-            depth_based_internal_aggregator_vec.push(DepthBasedInternalAggregator::new(m, i, additional_depth, &proposal, public_keys.clone(), internal_leader_divider));
+            depth_based_internal_aggregator_vec.push(DepthBasedInternalAggregator::new(m, i, additional_depth, &proposal, public_keys.clone(), internal_leader_divider, &ip));
         }
 
         // Set up validator connections.
-        let mut first_internal_aggregator = FirstInternalAggregator::new(m, additional_depth, &proposal, public_keys.clone());
+        let mut first_internal_aggregator = FirstInternalAggregator::new(m, additional_depth, &proposal, public_keys.clone(), &ip);
         first_internal_aggregator.open_connections().await;
         for mut dep_based in depth_based_internal_aggregator_vec.iter_mut() {
             dep_based.open_connections().await;
         }
 
-        let mut leaf_node = LeafNode::new(m, &proposal, public_keys.clone(), my_sig, agg_sig);
+        let mut leaf_node = LeafNode::new(m, &proposal, public_keys.clone(), my_sig, agg_sig, &ip);
         leaf_node.connect().await;
 
         let mut network = 200;
 
-        let mut leaf_aggregator = LeafAggregator::new(m, &proposal, public_keys.clone());
+        let mut leaf_aggregator = LeafAggregator::new(m, &proposal, public_keys.clone(), &ip);
 
         leaf_aggregator.connect().await;
 
@@ -141,9 +151,10 @@ pub(crate) async fn main() {
 
         // Leaf sends to 128 parents, one of them is real (simulator only has to create 127 now, we create a new validatortype for this that listens to the m input.)
 
-        //todo: Simulate average 1/3 byz case
+        //todo: Simulate average case
+        //todo: Make it work in docker with netem - actually 200ms
 
-        //todo: On highest level we might want to have signatures and not Macs. As verify cost < agg pub cost.
+        //todo: Optional: On highest level we might want to have signatures and not Macs. As verify cost < agg pub cost.
 
         // Do group by group. Try to find the one that is correct. This is quite fast we can do at least "a few groups".
         // The leader can verify the rest and send it to the next leader to have them include it.

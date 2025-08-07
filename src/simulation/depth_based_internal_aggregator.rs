@@ -33,7 +33,8 @@ pub struct DepthBasedInternalAggregator {
     // Public keys of all nodes in the system.
     pub public_keys: Arc<Vec<Arc<PublicKey>>>,
     // Channel to hand signatures that come from the children and process them.
-    pub signature_receiver: Receiver<(usize, BitVec, Signature, PublicKey, BitVec, Signature, PublicKey)>
+    pub signature_receiver: Receiver<(usize, BitVec, Signature, PublicKey, BitVec, Signature, PublicKey)>,
+    pub ip : String,
 }
 
 impl Default for DepthBasedInternalAggregator {
@@ -48,13 +49,14 @@ impl Default for DepthBasedInternalAggregator {
             parent_channels: broadcast::Sender::new(2),
             public_keys: Arc::new(Vec::new()),
             signature_receiver: async_channel::unbounded().1,
+            ip: "127.0.0.1".to_string(),
         }
     }
 }
 
 impl DepthBasedInternalAggregator {
 
-    pub fn new(m: usize, depth: usize, total_depth: usize, proposal: &Vec<u8>, public_keys: Vec<Arc<PublicKey>>, leader_divider: usize) -> Self {
+    pub fn new(m: usize, depth: usize, total_depth: usize, proposal: &Vec<u8>, public_keys: Vec<Arc<PublicKey>>, leader_divider: usize, ip: &String) -> Self {
         DepthBasedInternalAggregator {
             depth,
             m,
@@ -62,6 +64,7 @@ impl DepthBasedInternalAggregator {
             leader_divider,
             proposal: Arc::new(proposal.clone()),
             public_keys: Arc::new(public_keys),
+            ip: ip.clone(),
             ..Default::default()
         }
     }
@@ -73,7 +76,7 @@ impl DepthBasedInternalAggregator {
 
         let expected_sigs = (self.m / 16).pow((self.total_depth - self.depth) as u32) * self.m;
         println!("Expected sigs: {} at {} at {}", expected_sigs, self.depth, base_port);
-        connect_to_child_nodes(self.m, base_port, &self.proposal, &self.public_keys, &mut self.child_channels, signature_sender, expected_sigs).await;
+        connect_to_child_nodes(self.ip.clone(), self.m, base_port, &self.proposal, &self.public_keys, &mut self.child_channels, signature_sender, expected_sigs).await;
         self.signature_receiver=signature_receiver;
 
         println!("Finished preparing internal aggregator connections");
@@ -87,10 +90,10 @@ impl DepthBasedInternalAggregator {
             let base_port = 40_000 + 2000 * (self.depth - 1);
             if self.depth == 1 {
                 // Only the leader.
-                setup_parent_connections(base_port, 1, &mut self.parent_channels).await;
+                setup_parent_connections(self.ip.clone(), base_port, 1, &mut self.parent_channels).await;
             } else {
                 // Next higher up group.
-                setup_parent_connections(base_port, 128, &mut self.parent_channels).await;
+                setup_parent_connections(self.ip.clone(), base_port, 128, &mut self.parent_channels).await;
             }
         }
     }
@@ -158,7 +161,6 @@ impl DepthBasedInternalAggregator {
                 pub_vec.push(pub_key);
             }
 
-            println!("Size 1: {} {}", pub_vec.len(), sig_vec.len());
             // let agg_pub = AggregatePublicKey::aggregate(&pub_vec, false).unwrap().to_public_key();
             let agg_sig = AggregateSignature::aggregate(&sig_vec, false).unwrap().to_signature();
 
@@ -184,7 +186,6 @@ impl DepthBasedInternalAggregator {
                 pub_vec.push(pub_key);
             }
 
-            println!("Size 2: {} {}", pub_vec.len(), sig_vec.len());
             //let agg_pub = AggregatePublicKey::aggregate(&pub_vec, false).unwrap().to_public_key();
             let agg_sig = AggregateSignature::aggregate(&sig_vec, false).unwrap().to_signature();
 
@@ -203,8 +204,6 @@ impl DepthBasedInternalAggregator {
             biggest_bit_vec.append(&mut bit_vec);
         }
 
-        println!("Finalized at: {}", time_now.elapsed().as_millis());
-
         // Leader has no further parent.
         if self.depth != 0 {
             self.parent_channels.send((biggest_bit_vec, biggest_agg_sig, random_bit_vec, random_agg_sig)).unwrap();
@@ -221,13 +220,13 @@ impl DepthBasedInternalAggregator {
 }
 
 // connect to m child nodes. So we assume they're al
-pub async fn connect_to_child_nodes(m: usize, base_port: usize, proposal: &Arc<Vec<byte>>, public_keys: &Arc<Vec<Arc<PublicKey>>>, sender: &broadcast::Sender<()>, signature_sender: Sender<(usize, BitVec, Signature, PublicKey, BitVec, Signature, PublicKey)>, expected_sigs: usize) {
+pub async fn connect_to_child_nodes(ip: String, m: usize, base_port: usize, proposal: &Arc<Vec<byte>>, public_keys: &Arc<Vec<Arc<PublicKey>>>, sender: &broadcast::Sender<()>, signature_sender: Sender<(usize, BitVec, Signature, PublicKey, BitVec, Signature, PublicKey)>, expected_sigs: usize) {
 
     println!("Opening Port: {}", base_port);
 
     // Listen on base port for connection attempts.
     let port = base_port;
-    let addr = format!("127.0.0.1:{}", port);
+    let addr = format!("{}:{}", ip, port);
     let listener = TcpListener::bind(&addr).await.unwrap();
     let mut local_sender = sender.clone();
 
@@ -394,10 +393,10 @@ pub fn invert_pub(pk: &PublicKey) -> PublicKey {
     PublicKey::from(neg_affine)
 }
 
-pub async fn setup_parent_connections(base_port : usize, range: usize, sender: &mut broadcast::Sender<(BitVec, Signature, BitVec, Signature)>) {
+pub async fn setup_parent_connections(ip: String, base_port : usize, range: usize, sender: &mut broadcast::Sender<(BitVec, Signature, BitVec, Signature)>) {
     for i in 0..range {
         let port = base_port + i;
-        let addr = format!("127.0.0.1:{}", port);
+        let addr = format!("{}:{}", ip, port);
         let mut stream = TcpStream::connect(&addr).await.unwrap();
         let port_string = port.to_string();
 

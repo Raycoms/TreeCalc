@@ -27,10 +27,11 @@ pub struct Simulator {
     pub parent_channels: broadcast::Sender<()>,
     pub leaf_parent_channels: broadcast::Sender<()>,
     pub consensus_data: Arc<HashMap<usize, Vec<(PublicKey, Signature, BitVec)>>>,
+    pub ip : String,
 }
 
 impl Simulator {
-    pub fn new(m: usize, depth: usize, proposal: &Vec<u8>, leader_divider: usize) -> Self {
+    pub fn new(m: usize, depth: usize, proposal: &Vec<u8>, leader_divider: usize, ip: &String) -> Self {
         let N = (m/16).pow( (depth + 1) as u32) * m / leader_divider;
         Simulator {
             m,
@@ -42,6 +43,7 @@ impl Simulator {
             parent_channels: broadcast::channel(2).0,
             leaf_parent_channels: broadcast::channel(2).0,
             consensus_data: Arc::new(HashMap::new()),
+            ip: ip.clone(),
         }
     }
 
@@ -177,12 +179,12 @@ impl Simulator {
         setup_leaf_nodes(self, 10_000, self.m-1, sig_vec).await;
         println!("Finished preparing Simulator leaf connections");
 
-        setup_parent_connections(30_000, 127, &mut self.parent_channels).await;
+        setup_parent_connections(self, 30_000, 127).await;
         println!("Finished preparing Simulator parent connections");
 
         for i in 1..self.depth {
             let base_port = 40_000 + 2000 * i;
-            setup_parent_connections(base_port, 127, &mut self.parent_channels).await;
+            setup_parent_connections(self,base_port, 127).await;
         }
 
         println!("Finished Connections, sleeping for a sec");
@@ -197,7 +199,7 @@ impl Simulator {
         // Send out the leaf votes.
         self.leaf_channels.send(()).unwrap();
 
-        setup_leaf_parent_connections( 11_000, self.m - 1, &mut self.leaf_parent_channels).await;
+        setup_leaf_parent_connections(self,11_000, self.m - 1).await;
 
         setup_children_connections(&self,30_000, self.m).await;
 
@@ -230,7 +232,7 @@ pub async fn setup_leaf_nodes(
 ) {
     for i in 1..(range+1) {
         let port = base_port + i;
-        let addr = format!("127.0.0.1:{}", port);
+        let addr = format!("{}:{}", simulator.ip, port);
         let listener = TcpListener::bind(&addr).await.unwrap();
 
         let mut rx = simulator.leaf_channels.subscribe();
@@ -257,17 +259,17 @@ pub async fn setup_leaf_nodes(
 }
 
 pub async fn setup_parent_connections(
+    simulator: &mut Simulator,
     base_port: usize,
     range: usize,
-    sender: &broadcast::Sender<()>,
 ) {
     println!("Opening Ports: {} to {}", base_port + 1, base_port + range + 1);
     for i in 0..range {
         let port = base_port + i + 1;
-        let addr = format!("127.0.0.1:{}", port);
+        let addr = format!("{}:{}", simulator.ip, port);
         let listener = TcpListener::bind(&addr).await.unwrap();
 
-        let mut rx = sender.subscribe();
+        let mut rx = simulator.parent_channels.subscribe();
 
         // Spawn a task to accept connections on this listener
         PREPARE_POOL.spawn(async move {
@@ -292,7 +294,7 @@ pub async fn setup_children_connections(simulator: &Simulator, base_port: usize,
     // We have m-1 connections. Each of them sends a signature aggregate. 20 distinct ones. The first one we already did!
     for i in 1..range {
         let port = base_port;
-        let addr = format!("127.0.0.1:{}", port);
+        let addr = format!("{}:{}", simulator.ip, port);
         let mut stream = TcpStream::connect(&addr).await.unwrap();
 
         let data_copy = simulator.consensus_data.clone();
@@ -323,14 +325,14 @@ pub async fn setup_children_connections(simulator: &Simulator, base_port: usize,
     }
 }
 
-pub async fn setup_leaf_parent_connections(base_port: usize, range: usize, sender: &broadcast::Sender<()>,) {
+pub async fn setup_leaf_parent_connections(simulator: &Simulator, base_port: usize, range: usize) {
 
     // We have m-1 connections. Each of them sends a signature aggregate. 20 distinct ones. The first one we already did!
     for i in 0..range {
         let port = base_port + i;
-        let addr = format!("127.0.0.1:{}", port);
+        let addr = format!("{}:{}", simulator.ip, port);
         let mut stream = TcpStream::connect(&addr).await.unwrap();
-        let mut rx = sender.subscribe();
+        let mut rx = simulator.leaf_parent_channels.subscribe();
 
         PREPARE_POOL.spawn(async move {
             rx.recv().await.unwrap();
@@ -344,7 +346,7 @@ pub async fn setup_depth_children_connections(simulator: &Simulator, base_port: 
 
     for i in 1..(range+1) {
         let port = base_port;
-        let addr = format!("127.0.0.1:{}", port);
+        let addr = format!("{}:{}", simulator.ip, port);
         let mut stream = TcpStream::connect(&addr).await.unwrap();
 
         let data_copy = simulator.consensus_data.clone();

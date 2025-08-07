@@ -22,11 +22,12 @@ pub struct LeafNode {
     pub agg_sig: Signature,
     pub parent_channels: broadcast::Sender<(Signature)>,
     pub pub_cache: Vec<AggregatePublicKey>,
+    pub ip: String,
 }
 
 impl LeafNode {
 
-    pub fn new(m: usize, proposal: &Vec<u8>, public_keys: Vec<Arc<PublicKey>>, my_sig: Signature, agg_sig: Signature) -> Self {
+    pub fn new(m: usize, proposal: &Vec<u8>, public_keys: Vec<Arc<PublicKey>>, my_sig: Signature, agg_sig: Signature, ip: &String) -> Self {
         let mut rng = rand::thread_rng();
         let mut ikm = [0u8; 32];
         rng.fill_bytes(&mut ikm);
@@ -39,6 +40,7 @@ impl LeafNode {
             agg_sig,
             parent_channels: Sender::new(2),
             pub_cache: Vec::new(),
+            ip: ip.clone(),
         }
     }
 
@@ -46,7 +48,7 @@ impl LeafNode {
     pub async fn connect(&mut self) {
 
         // We set up connections for: parent nodes.
-        setup_parent_connections(10_000, self.m, &mut self.parent_channels).await;
+        setup_parent_connections(self.ip.clone(), 10_000, self.m, &mut self.parent_channels).await;
         println!("Finished preparing leaf connections");
 
         for i in 0..4 {
@@ -120,10 +122,10 @@ impl LeafNode {
 
 }
 
-pub async fn setup_parent_connections(base_port : usize, range: usize, sender: &mut Sender<(Signature)>) {
+pub async fn setup_parent_connections(ip: String, base_port : usize, range: usize, sender: &mut Sender<(Signature)>) {
     for i in 0..(range -1) {
         let port = base_port + 1000 + i;
-        let addr = format!("127.0.0.1:{}", port);
+        let addr = format!("{}:{}", ip, port);
         let listener = TcpListener::bind(&addr).await.unwrap();
 
         // Spawn a task to accept connections on this listener
@@ -145,7 +147,7 @@ pub async fn setup_parent_connections(base_port : usize, range: usize, sender: &
         });
     }
 
-    let addr = format!("127.0.0.1:{}", base_port);
+    let addr = format!("{}:{}", ip, base_port);
 
     let listener = TcpListener::bind(&addr).await.unwrap();
     let mut rx = sender.subscribe();

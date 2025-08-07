@@ -23,7 +23,8 @@ pub struct LeafAggregator {
     pub leaf_channels: broadcast::Sender<()>,
     pub parent_channels: broadcast::Sender<(BitVec, Signature)>,
     pub public_keys: Arc<Vec<Arc<PublicKey>>>,
-    pub signature_map: Arc<DashMap<usize, Option<Signature>>>
+    pub signature_map: Arc<DashMap<usize, Option<Signature>>>,
+    pub ip: String,
 }
 
 impl Default for LeafAggregator {
@@ -37,13 +38,14 @@ impl Default for LeafAggregator {
             parent_channels: broadcast::Sender::new(2),
             public_keys: Arc::new(Vec::new()),
             signature_map: Arc::new(DashMap::new()),
+            ip: "127.0.0.1".to_string(),
         }
     }
 }
 
 impl LeafAggregator {
 
-    pub fn new(m: usize, proposal: &Vec<u8>, public_keys: Vec<Arc<PublicKey>>) -> Self {
+    pub fn new(m: usize, proposal: &Vec<u8>, public_keys: Vec<Arc<PublicKey>>, ip: &String) -> Self {
         let mut rng = rand::thread_rng();
         let mut ikm = [0u8; 32];
         rng.fill_bytes(&mut ikm);
@@ -57,6 +59,7 @@ impl LeafAggregator {
             private_key,
             proposal: Arc::new(proposal.clone()),
             public_keys: Arc::new(public_keys),
+            ip: ip.clone(),
             ..Default::default()
         }
     }
@@ -70,7 +73,7 @@ impl LeafAggregator {
         let (mut signature_sender, mut signature_receiver) = async_channel::bounded(self.m);
 
         // Leaf nodes will send out messages to their parent
-        connect_to_leaf_nodes( 10_000, self.m, signature_sender, &mut self.leaf_channels).await;
+        connect_to_leaf_nodes( self.ip.clone(), 10_000, self.m, signature_sender, &mut self.leaf_channels).await;
         println!("Finished preparing Validator leaf connections");
 
         // So we could verify them all independently.
@@ -91,7 +94,7 @@ impl LeafAggregator {
             });
         }
 
-        setup_parent_connections(30_000, 128, &mut self.parent_channels).await;
+        setup_parent_connections(self.ip.clone(), 30_000, 128, &mut self.parent_channels).await;
     }
 
     // Run simulator by notifying all threads to send the message to the client.
@@ -125,16 +128,12 @@ impl LeafAggregator {
                 }
 
                 if vec.len() >= PARALLEL_SLIZES {
-                    println!("Sent first set! {} {}", vec.len(), time_now.elapsed().as_millis());
-
                     let new_vec = vec.split_off(PARALLEL_SLIZES);
                     tx2.send(vec).await.unwrap();
                     vec = new_vec;
                 }
                 // After I got all stop querying them.
                 if curr_index >= m_copy {
-                    println!("Sent last set! {} {}", vec.len(), time_now.elapsed().as_millis());
-
                     tx2.send(vec).await.unwrap();
                     drop(tx2);
                     break;
@@ -170,7 +169,6 @@ impl LeafAggregator {
 
                             //agg_sig.to_signature().verify(false, &proposal, DST, &[], &agg_pub.to_public_key(), false);
                             final_agg_sender_copy.send((pub_bit_vec, agg_sig, agg_pub, pub_vec.len())).await.unwrap();
-                            println!("Sent an agg!");
                         }
                         _ => break 'task
                     }
@@ -187,7 +185,6 @@ impl LeafAggregator {
             agg_pub.add_aggregate(&local_agg_pub);
             len += local_len;
             bit_vec.or(&local_bit_vec);
-            println!("got {}", len);
 
             if len >= self.m {
                 break;
@@ -209,10 +206,10 @@ impl LeafAggregator {
     }
 }
 
-pub async fn connect_to_leaf_nodes(base_port : usize, range: usize, signature_sender: async_channel::Sender<(usize, Signature)>, sender: &mut broadcast:: Sender<()>) {
+pub async fn connect_to_leaf_nodes(ip: String, base_port : usize, range: usize, signature_sender: async_channel::Sender<(usize, Signature)>, sender: &mut broadcast:: Sender<()>) {
     for i in 0..range {
         let port = base_port + i;
-        let addr = format!("127.0.0.1:{}", port);
+        let addr = format!("{}:{}", ip, port);
 
         let mut rx = sender.subscribe();
 
@@ -237,10 +234,10 @@ pub async fn connect_to_leaf_nodes(base_port : usize, range: usize, signature_se
     }
 }
 
-pub async fn setup_parent_connections(base_port : usize, range: usize, sender: &mut broadcast::Sender<(BitVec, Signature)>) {
+pub async fn setup_parent_connections(ip: String, base_port : usize, range: usize, sender: &mut broadcast::Sender<(BitVec, Signature)>) {
     for i in 0..range {
         let port = base_port + i;
-        let addr = format!("127.0.0.1:{}", port);
+        let addr = format!("{}:{}", ip, port);
         let mut stream = TcpStream::connect(&addr).await.unwrap();
         let port_string = port.to_string();
 
