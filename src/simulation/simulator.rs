@@ -1,8 +1,9 @@
-use crate::simulation::main::{HmacSha256, DST, PREPARE_POOL};
+#![allow(non_snake_case)]
+
+use crate::simulation::main::{DST, PREPARE_POOL};
 use bit_vec::BitVec;
 use blst::byte;
 use blst::min_pk::{AggregatePublicKey, AggregateSignature, PublicKey, SecretKey, Signature};
-use hmac::Mac;
 use rand_core::RngCore;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,6 +28,7 @@ pub struct Simulator {
     pub parent_channels: broadcast::Sender<()>,
     pub leaf_parent_channels: broadcast::Sender<()>,
     pub consensus_data: Arc<HashMap<usize, Vec<(PublicKey, Signature, BitVec)>>>,
+    pub priv_keys: Vec<Arc<SecretKey>>,
     pub ip : String,
 }
 
@@ -42,14 +44,16 @@ impl Simulator {
             leaf_channels: broadcast::channel(2).0,
             parent_channels: broadcast::channel(2).0,
             leaf_parent_channels: broadcast::channel(2).0,
+            priv_keys: Vec::new(),
             consensus_data: Arc::new(HashMap::new()),
             ip: ip.clone(),
         }
     }
 
-    pub async fn init(&mut self) -> (Vec<Arc<PublicKey>>, Signature, Signature, Arc<Vec<Signature>>) {
+    pub async fn init(&mut self) -> (Vec<Arc<PublicKey>>, Vec<Arc<SecretKey>>, Signature, Signature, Arc<Vec<Signature>>) {
         // We set up connections for: Leaf nodes, siblings & parent nodes.
         let mut pub_keys = Vec::new();
+        let mut priv_keys = Vec::new();
 
         println!("Starting Simulator with {} {}", self.N, self.m);
 
@@ -57,7 +61,7 @@ impl Simulator {
         for _ in 0..8 {
             let proposal_copy = self.proposal.clone();
             let share = self.N/8;
-            let senderClone = sender.clone();
+            let sender_clone = sender.clone();
             PREPARE_POOL.spawn(async move {
                 println!("Starting task with share: {}", share);
                 for _ in 0..share {
@@ -68,21 +72,24 @@ impl Simulator {
                     }
                     let pvt_key = SecretKey::key_gen(&ikm, &[]).unwrap();
                     let pub_key = pvt_key.sk_to_pk();
-                    senderClone.send((pub_key, pvt_key.sign(&proposal_copy, DST, &[]))).await.unwrap();
+                    sender_clone.send((pub_key, pvt_key.sign(&proposal_copy, DST, &[]), pvt_key)).await.unwrap();
                 }
-                drop(senderClone);
+                drop(sender_clone);
             });
         }
         drop(sender);
 
         let mut sig_vec = Vec::new();
-        while let Some((pub_key, sig)) = receiver.recv().await {
+        while let Some((pub_key, sig, pvt_key)) = receiver.recv().await {
             pub_keys.push(Arc::new(pub_key));
+            priv_keys.push(Arc::new(pvt_key));
             sig_vec.push(sig);
             if sig_vec.len() % 100_000 == 0 {
                 println!("Got 100k Sigs, now at: {}", sig_vec.len());
             }
         }
+
+        self.priv_keys.append(&mut priv_keys);
 
         let sig_vec = Arc::new(sig_vec);
 
@@ -170,7 +177,7 @@ impl Simulator {
         self.consensus_data = Arc::new(agg_map);
 
         println!("Finished Aggregation, Opening Connections");
-        (Vec::from(pub_keys), agg_sig, sig_vec.get(0).unwrap().clone(), sig_vec)
+        (Vec::from(pub_keys), self.priv_keys.clone(), agg_sig, sig_vec.get(0).unwrap().clone(), sig_vec)
     }
 
     pub async fn open_connections(&mut self, sig_vec: &Arc<Vec<Signature>>) {
@@ -289,6 +296,7 @@ pub async fn setup_parent_connections(
     }
 }
 
+/// These are the child processes of the first internal aggregator.
 pub async fn setup_children_connections(simulator: &Simulator, base_port: usize, range: usize) {
 
     // We have m-1 connections. Each of them sends a signature aggregate. 20 distinct ones. The first one we already did!
@@ -298,8 +306,8 @@ pub async fn setup_children_connections(simulator: &Simulator, base_port: usize,
         let mut stream = TcpStream::connect(&addr).await.unwrap();
 
         let data_copy = simulator.consensus_data.clone();
-
         let local_idx = i/16;
+        let priv_key = simulator.priv_keys.get(local_idx).unwrap().clone();
 
         PREPARE_POOL.spawn(async move {
             let copy = data_copy.get(&0).unwrap();
@@ -309,18 +317,18 @@ pub async fn setup_children_connections(simulator: &Simulator, base_port: usize,
                 panic!("Couldn't find signature for child connection {}", i);
             }
 
-            let port_string = port.to_string();
-            let expected_mac = HmacSha256::new_from_slice(port_string.as_bytes());
-            let mut unwrapped_mac = expected_mac.unwrap();
+            let (pub_key, agg_sig, bit_vec) = sub_copy.unwrap();
 
-            let (pub_key, sig, bit_vec) = sub_copy.unwrap();
-            unwrapped_mac.update(&sig.clone().to_bytes());
+            let mut msg_bytes = agg_sig.to_bytes().to_vec();
+            msg_bytes.append(&mut bit_vec.to_bytes().to_vec());
+
+            let personal_sig = priv_key.sign(&msg_bytes, DST, &[]);
 
             stream.write(&local_idx.to_be_bytes()).await.unwrap();
-            stream.write(&bit_vec.to_bytes()).await.unwrap();
-            stream.write(&sig.to_bytes()).await.unwrap();
-            stream.write(&unwrapped_mac.finalize().into_bytes()).await.unwrap();
 
+            stream.write(&bit_vec.to_bytes()).await.unwrap();
+            stream.write(&agg_sig.to_bytes()).await.unwrap();
+            stream.write(&personal_sig.to_bytes()).await.unwrap();
         });
     }
 }
@@ -350,7 +358,11 @@ pub async fn setup_depth_children_connections(simulator: &Simulator, base_port: 
         let mut stream = TcpStream::connect(&addr).await.unwrap();
 
         let data_copy = simulator.consensus_data.clone();
+
         let local_idx = i/16;
+
+        let priv_key = simulator.priv_keys.get(local_idx).unwrap().clone();
+
         PREPARE_POOL.spawn(async move {
             let copy = data_copy.get(&reverse_idx).unwrap();
             let sub_copy = copy.get(local_idx);
@@ -358,22 +370,24 @@ pub async fn setup_depth_children_connections(simulator: &Simulator, base_port: 
                 panic!("Couldn't find sig at depth {} {} {} {}", i, depth, reverse_idx, copy.len());
             }
 
-            let port_string = port.to_string();
-            let expected_mac = HmacSha256::new_from_slice(port_string.as_bytes());
-            let mut unwrapped_mac = expected_mac.unwrap();
+            let (pub_key, agg_sig, bit_vec) = sub_copy.unwrap();
 
-            let (pub_key, sig, bit_vec) = sub_copy.unwrap();
-            unwrapped_mac.update(&sig.clone().to_bytes());
+            let mut msg_bytes = agg_sig.to_bytes().to_vec();
+            msg_bytes.append(&mut bit_vec.to_bytes().to_vec());
+            msg_bytes.append(&mut agg_sig.to_bytes().to_vec());
+            msg_bytes.append(&mut bit_vec.to_bytes().to_vec());
+
+            let personal_sig = priv_key.sign(&msg_bytes, DST, &[]);
 
             stream.write(&local_idx.to_be_bytes()).await.unwrap();
 
             stream.write(&bit_vec.to_bytes()).await.unwrap();
-            stream.write(&sig.to_bytes()).await.unwrap();
+            stream.write(&agg_sig.to_bytes()).await.unwrap();
 
             stream.write(&bit_vec.to_bytes()).await.unwrap();
-            stream.write(&sig.to_bytes()).await.unwrap();
+            stream.write(&agg_sig.to_bytes()).await.unwrap();
 
-            stream.write(&unwrapped_mac.finalize().into_bytes()).await.unwrap();
+            stream.write(&personal_sig.to_bytes()).await.unwrap();
         });
     }
 }

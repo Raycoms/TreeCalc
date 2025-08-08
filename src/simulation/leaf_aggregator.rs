@@ -1,17 +1,16 @@
+#![allow(non_snake_case)]
+
 use std::sync::Arc;
-use std::time::Instant;
 use bit_vec::BitVec;
 use blst::{byte};
 use blst::BLST_ERROR::BLST_SUCCESS;
 use blst::min_pk::{AggregatePublicKey, AggregateSignature, PublicKey, SecretKey, Signature};
 use dashmap::{DashMap};
-use hmac::Mac;
 use rand_core::RngCore;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use crate::simulation::main::{HmacSha256, DST, RUN_POOL};
+use crate::simulation::main::{DST, RUN_POOL};
 use tokio::net::{TcpStream};
 use tokio::sync::{broadcast, mpsc};
-use tokio::task;
 
 pub struct LeafAggregator {
     // Fanout.
@@ -19,7 +18,7 @@ pub struct LeafAggregator {
     // Proposal byte vector.
     pub proposal: Arc<Vec<byte>>,
     pub public_key: PublicKey,
-    pub private_key: SecretKey,
+    pub private_key: Arc<SecretKey>,
     pub leaf_channels: broadcast::Sender<()>,
     pub parent_channels: broadcast::Sender<(BitVec, Signature)>,
     pub public_keys: Arc<Vec<Arc<PublicKey>>>,
@@ -32,7 +31,7 @@ impl Default for LeafAggregator {
         LeafAggregator {
             m: 0,
             public_key: PublicKey::default(),
-            private_key: SecretKey::default(),
+            private_key: Arc::new(SecretKey::default()),
             proposal: Arc::new(Vec::new()),
             leaf_channels: broadcast::Sender::new(2),
             parent_channels: broadcast::Sender::new(2),
@@ -45,17 +44,16 @@ impl Default for LeafAggregator {
 
 impl LeafAggregator {
 
-    pub fn new(m: usize, proposal: &Vec<u8>, public_keys: Vec<Arc<PublicKey>>, ip: &String) -> Self {
+    pub fn new(m: usize, proposal: &Vec<u8>, public_keys: Vec<Arc<PublicKey>>, ip: &String, private_keys: &Vec<Arc<SecretKey>>) -> Self {
         let mut rng = rand::thread_rng();
         let mut ikm = [0u8; 32];
         rng.fill_bytes(&mut ikm);
 
-        let private_key = SecretKey::key_gen(&ikm, &[]).unwrap();
-        let public_key = private_key.sk_to_pk();
+        let private_key = private_keys.get(0).unwrap().clone();
 
         LeafAggregator {
             m,
-            public_key,
+            public_key: private_key.sk_to_pk(),
             private_key,
             proposal: Arc::new(proposal.clone()),
             public_keys: Arc::new(public_keys),
@@ -94,7 +92,7 @@ impl LeafAggregator {
             });
         }
 
-        setup_parent_connections(self.ip.clone(), 30_000, 128, &mut self.parent_channels).await;
+        setup_parent_connections(self.ip.clone(), 30_000, 128, &mut self.parent_channels, &self.private_key).await;
     }
 
     // Run simulator by notifying all threads to send the message to the client.
@@ -116,8 +114,6 @@ impl LeafAggregator {
         let m_copy = self.m.clone();
         let tx2 = tx.clone();
         RUN_POOL.spawn(async move {
-            let time_now = Instant::now();
-
             loop {
                 // Drain dashmap here. Entry might've not yet synched. Or entry might be empty because of timeout.
                 if let Some(the_sig) = sig_map_copy.get(&curr_index) {
@@ -234,31 +230,32 @@ pub async fn connect_to_leaf_nodes(ip: String, base_port : usize, range: usize, 
     }
 }
 
-pub async fn setup_parent_connections(ip: String, base_port : usize, range: usize, sender: &mut broadcast::Sender<(BitVec, Signature)>) {
+pub async fn setup_parent_connections(ip: String, base_port : usize, range: usize, sender: &mut broadcast::Sender<(BitVec, Signature)>, private_key: &Arc<SecretKey>) {
     for i in 0..range {
         let port = base_port + i;
         let addr = format!("{}:{}", ip, port);
         let mut stream = TcpStream::connect(&addr).await.unwrap();
-        let port_string = port.to_string();
 
         // Spawn a task to accept connections on this listener
         let mut rx = sender.subscribe();
+        let private_key = private_key.clone();
 
         RUN_POOL.spawn(async move {
 
-            let expected_mac = HmacSha256::new_from_slice(port_string.as_bytes());
-            let mut unwrapped_mac = expected_mac.unwrap();
-
             // Connect to parent for sending.
             // Just send a single message and disconnect.
-            if let Ok((bitvec, sig)) = rx.recv().await {
-                unwrapped_mac.update(&sig.clone().to_bytes());
+            if let Ok((bit_vec, agg_sig)) = rx.recv().await {
+
+                let mut msg_bytes = agg_sig.to_bytes().to_vec();
+                msg_bytes.append(&mut bit_vec.to_bytes().to_vec());
+
+                let personal_sig = private_key.sign(&msg_bytes, DST, &[]);
 
                 let index : usize = 0;
                 stream.write(&index.to_be_bytes()).await.unwrap();
-                stream.write(&bitvec.to_bytes()).await.unwrap();
-                stream.write(&sig.to_bytes()).await.unwrap();
-                stream.write(&unwrapped_mac.finalize().into_bytes()).await.unwrap();
+                stream.write(&bit_vec.to_bytes()).await.unwrap();
+                stream.write(&agg_sig.to_bytes()).await.unwrap();
+                stream.write(&personal_sig.to_bytes()).await.unwrap();
             }
         });
     }

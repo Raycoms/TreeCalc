@@ -1,3 +1,6 @@
+#![allow(non_snake_case)]
+#![allow(dead_code)]
+
 use statrs::distribution::{Binomial, Discrete, DiscreteCDF, Hypergeometric};
 
 pub fn calc() {

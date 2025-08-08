@@ -1,3 +1,6 @@
+#![allow(non_snake_case)]
+#![allow(dead_code)]
+
 use std::fs::File;
 use std::io;
 use std::io::{BufRead, Write};
@@ -30,7 +33,7 @@ pub const MSG: &[u8] = b"blst is such a blast";
 
 pub(crate) fn main() {
     println!("Hello, world!");
-    gen_keys();
+    let _ = gen_keys();
     let (public_keys, private_keys) = load_keys();
     let signatures = bench_sign(&private_keys);
     bench_single_verify(&signatures, &public_keys);
@@ -46,10 +49,10 @@ pub fn gen_keys()  -> io::Result<()> {
         let mut ikm = [0u8; 32];
         rng.fill_bytes(&mut ikm);
 
-        let pvtKey = SecretKey::key_gen(&ikm, &[]).unwrap();
-        let pubKey = pvtKey.sk_to_pk();
+        let pvt_key = SecretKey::key_gen(&ikm, &[]).unwrap();
+        let pub_key = pvt_key.sk_to_pk();
 
-        file.write_all(format!("{} {}\n", encode(pvtKey.to_bytes()), encode(pubKey.to_bytes())).as_bytes())?;
+        file.write_all(format!("{} {}\n", encode(pvt_key.to_bytes()), encode(pub_key.to_bytes())).as_bytes())?;
     }
     Ok(())
 }
@@ -59,19 +62,19 @@ pub fn load_keys() -> (Vec<PublicKey>, Vec<SecretKey>) {
     let file = File::open("../../sigs_min_pk.txt").unwrap();
     let reader = io::BufReader::new(file);
 
-    let mut privateKeys = Vec::new();
-    let mut publicKeys = Vec::new();
+    let mut private_keys = Vec::new();
+    let mut public_keys = Vec::new();
 
     for line in reader.lines() {
         let line = line.unwrap();
         let content : Vec<_> = line.split(" ").collect();
-        privateKeys.push(SecretKey::from_bytes(decode(content[0]).unwrap().as_ref()).unwrap());
-        publicKeys.push(PublicKey::from_bytes(decode(content[1]).unwrap().as_ref()).unwrap());
-        if privateKeys.len() >= 1_000_000 {
+        private_keys.push(SecretKey::from_bytes(decode(content[0]).unwrap().as_ref()).unwrap());
+        public_keys.push(PublicKey::from_bytes(decode(content[1]).unwrap().as_ref()).unwrap());
+        if private_keys.len() >= 1_000_000 {
             break;
         }
     }
-    (publicKeys, privateKeys)
+    (public_keys, private_keys)
 }
 
 // Bench mark signing.

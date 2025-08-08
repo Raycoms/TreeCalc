@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc};
 use std::time::Instant;
@@ -5,9 +7,8 @@ use async_channel::{Receiver, Sender};
 use bit_vec::BitVec;
 use blst::{byte};
 use blst::BLST_ERROR::BLST_SUCCESS;
-use blst::min_pk::{AggregatePublicKey, AggregateSignature, PublicKey, Signature};
+use blst::min_pk::{AggregatePublicKey, AggregateSignature, PublicKey, SecretKey, Signature};
 use dashmap::DashMap;
-use hmac::digest::typenum::Bit;
 use hmac::Mac;
 use rand::{thread_rng, Rng};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -35,6 +36,7 @@ pub struct DepthBasedInternalAggregator {
     // Channel to hand signatures that come from the children and process them.
     pub signature_receiver: Receiver<(usize, BitVec, Signature, PublicKey, BitVec, Signature, PublicKey)>,
     pub ip : String,
+    pub private_key: Arc<SecretKey>
 }
 
 impl Default for DepthBasedInternalAggregator {
@@ -50,13 +52,14 @@ impl Default for DepthBasedInternalAggregator {
             public_keys: Arc::new(Vec::new()),
             signature_receiver: async_channel::unbounded().1,
             ip: "127.0.0.1".to_string(),
+            private_key: Arc::new(SecretKey::default())
         }
     }
 }
 
 impl DepthBasedInternalAggregator {
 
-    pub fn new(m: usize, depth: usize, total_depth: usize, proposal: &Vec<u8>, public_keys: Vec<Arc<PublicKey>>, leader_divider: usize, ip: &String) -> Self {
+    pub fn new(m: usize, depth: usize, total_depth: usize, proposal: &Vec<u8>, public_keys: Vec<Arc<PublicKey>>, leader_divider: usize, ip: &String, private_keys: &Vec<Arc<SecretKey>>) -> Self {
         DepthBasedInternalAggregator {
             depth,
             m,
@@ -65,6 +68,7 @@ impl DepthBasedInternalAggregator {
             proposal: Arc::new(proposal.clone()),
             public_keys: Arc::new(public_keys),
             ip: ip.clone(),
+            private_key: private_keys.get(0).unwrap().clone(),
             ..Default::default()
         }
     }
@@ -90,10 +94,10 @@ impl DepthBasedInternalAggregator {
             let base_port = 40_000 + 2000 * (self.depth - 1);
             if self.depth == 1 {
                 // Only the leader.
-                setup_parent_connections(self.ip.clone(), base_port, 1, &mut self.parent_channels).await;
+                setup_parent_connections(self.ip.clone(), base_port, 1, &mut self.parent_channels, &self.private_key).await;
             } else {
                 // Next higher up group.
-                setup_parent_connections(self.ip.clone(), base_port, 128, &mut self.parent_channels).await;
+                setup_parent_connections(self.ip.clone(), base_port, 128, &mut self.parent_channels, &self.private_key).await;
             }
         }
     }
@@ -294,16 +298,26 @@ pub async fn connect_to_child_nodes(ip: String, m: usize, base_port: usize, prop
                             }
                         };
 
-                        let mut mac_buffer = [0; 32];
-                        socket.read_exact(&mut mac_buffer).await.unwrap();
+                        let mut personal_sig_buffer = [0; 96];
+                        socket.read_exact(&mut personal_sig_buffer).await.unwrap();
 
-                        // This is the mac of the sender we're expecting here.
-                        let expected_mac = HmacSha256::new_from_slice(port_string.as_bytes());
-                        let mut unwrapped_mac = expected_mac.unwrap();
-                        unwrapped_mac.update(&sig.clone().to_bytes());
+                        let personal_sig = match Signature::from_bytes(&personal_sig_buffer) {
+                            Ok(sig) => {
+                                sig
+                            }
+                            Err(err) => {
+                                eprintln!("FI: BLS load Error 1 {:?}", err);
+                                return;
+                            }
+                        };
 
-                        if !unwrapped_mac.verify_slice(mac_buffer.as_slice()).is_ok() {
-                            println!("Invalid Mac from {}", address);
+                        let mut msg = sig_buffer.to_vec();
+                        msg.append(&mut bit_vec_buffer.to_vec());
+                        msg.append(&mut sig_buffer2.to_vec());
+                        msg.append(&mut bit_vec_buffer2.to_vec());
+
+                        if !personal_sig.verify(false, &msg, DST, &[], &local_public_keys_copy.get(group_id).unwrap(), false).eq(&BLST_SUCCESS) {
+                            println!("2 Invalid Sig from {}", address);
                         } else {
 
                             let start_index = group_id * local_expected_sigs;
@@ -393,35 +407,36 @@ pub fn invert_pub(pk: &PublicKey) -> PublicKey {
     PublicKey::from(neg_affine)
 }
 
-pub async fn setup_parent_connections(ip: String, base_port : usize, range: usize, sender: &mut broadcast::Sender<(BitVec, Signature, BitVec, Signature)>) {
+pub async fn setup_parent_connections(ip: String, base_port : usize, range: usize, sender: &mut broadcast::Sender<(BitVec, Signature, BitVec, Signature)>, private_key: &Arc<SecretKey>) {
     for i in 0..range {
         let port = base_port + i;
         let addr = format!("{}:{}", ip, port);
         let mut stream = TcpStream::connect(&addr).await.unwrap();
-        let port_string = port.to_string();
 
         // Spawn a task to accept connections on this listener
         let mut rx = sender.subscribe();
+        let private_key = private_key.clone();
 
         RUN_POOL.spawn(async move {
-
-            let expected_mac = HmacSha256::new_from_slice(port_string.as_bytes());
-            let mut unwrapped_mac = expected_mac.unwrap();
-
             // Connect to parent for sending.
             // Just send a single message and disconnect.
-            if let Ok((bit_vec, sig, bit_vec2, sig2)) = rx.recv().await {
-                unwrapped_mac.update(&sig.clone().to_bytes());
+            if let Ok((bit_vec, agg_sig, bit_vec2, agg_sig2)) = rx.recv().await {
+                let mut msg_bytes = agg_sig.to_bytes().to_vec();
+                msg_bytes.append(&mut bit_vec.to_bytes().to_vec());
+                msg_bytes.append(&mut agg_sig2.to_bytes().to_vec());
+                msg_bytes.append(&mut bit_vec2.to_bytes().to_vec());
+
+                let personal_sig = private_key.sign(&msg_bytes, DST, &[]);
 
                 println!("send to: {} {} {}", i.clone(), port.clone(), bit_vec.len());
 
                 let index : usize = 0;
                 stream.write(&index.to_be_bytes()).await.unwrap();
                 stream.write(&bit_vec.to_bytes()).await.unwrap();
-                stream.write(&sig.to_bytes()).await.unwrap();
+                stream.write(&agg_sig.to_bytes()).await.unwrap();
                 stream.write(&bit_vec2.to_bytes()).await.unwrap();
-                stream.write(&sig2.to_bytes()).await.unwrap();
-                stream.write(&unwrapped_mac.finalize().into_bytes()).await.unwrap();
+                stream.write(&agg_sig2.to_bytes()).await.unwrap();
+                stream.write(&personal_sig.to_bytes()).await.unwrap();
             }
         });
     }

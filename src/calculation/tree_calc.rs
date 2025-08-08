@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+#![allow(dead_code)]
 
 // Signing 1000000 times took: 311.503424024s
 // Verifying 1000000 times took: 882.21440825s

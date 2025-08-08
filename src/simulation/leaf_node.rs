@@ -1,16 +1,15 @@
+#![allow(non_snake_case)]
+
 use std::sync::Arc;
 use blst::{byte};
 use blst::BLST_ERROR::BLST_SUCCESS;
 use blst::min_pk::{AggregatePublicKey, PublicKey, Signature};
-use hmac::Mac;
-use log::info;
 use rand_core::RngCore;
 use tokio::io::{AsyncWriteExt};
 use crate::simulation::main::{DST, RUN_POOL};
 use tokio::net::{TcpListener};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::Sender;
-use tokio::task;
 
 pub struct LeafNode {
     // Fanout.
@@ -20,7 +19,7 @@ pub struct LeafNode {
     pub public_keys: Arc<Vec<Arc<PublicKey>>>,
     pub my_sig: Signature,
     pub agg_sig: Signature,
-    pub parent_channels: broadcast::Sender<(Signature)>,
+    pub parent_channels: broadcast::Sender<Signature>,
     pub pub_cache: Vec<AggregatePublicKey>,
     pub ip: String,
 }
@@ -122,7 +121,7 @@ impl LeafNode {
 
 }
 
-pub async fn setup_parent_connections(ip: String, base_port : usize, range: usize, sender: &mut Sender<(Signature)>) {
+pub async fn setup_parent_connections(ip: String, base_port : usize, range: usize, sender: &mut Sender<Signature>) {
     for i in 0..(range -1) {
         let port = base_port + 1000 + i;
         let addr = format!("{}:{}", ip, port);
@@ -135,7 +134,7 @@ pub async fn setup_parent_connections(ip: String, base_port : usize, range: usiz
             match listener.accept().await {
                 Ok((mut socket, addr)) => {
                     // Spawn a new task for each connection
-                    if let Ok((sig)) = rx2.recv().await {
+                    if let Ok(sig) = rx2.recv().await {
                         socket.write(&sig.to_bytes()).await.unwrap();
                     }
                     drop(rx2);
@@ -157,7 +156,7 @@ pub async fn setup_parent_connections(ip: String, base_port : usize, range: usiz
         match listener.accept().await {
             Ok((mut socket, addr)) => {
                 // Spawn a new task for each connection
-                if let Ok((sig)) = rx.recv().await {
+                if let Ok(sig) = rx.recv().await {
                     socket.write(&sig.to_bytes()).await.unwrap();
                 }
                 drop(rx);

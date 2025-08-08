@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use get_if_addrs::get_if_addrs;
@@ -76,7 +78,7 @@ pub(crate) async fn main() {
     OsRng.fill_bytes(&mut proposal);
 
     let mut simulator = Simulator::new(m, additional_depth, &proposal, leader_divider, &ip);
-    let (public_keys, agg_sig, my_sig, sig_vec) = simulator.init().await;
+    let (public_keys, private_keys, agg_sig, my_sig, sig_vec) = simulator.init().await;
 
     let mut final_time = 0;
     for _ in 0..10 {
@@ -90,11 +92,11 @@ pub(crate) async fn main() {
             if i == 0 {
                 internal_leader_divider = leader_divider;
             }
-            depth_based_internal_aggregator_vec.push(DepthBasedInternalAggregator::new(m, i, additional_depth, &proposal, public_keys.clone(), internal_leader_divider, &ip));
+            depth_based_internal_aggregator_vec.push(DepthBasedInternalAggregator::new(m, i, additional_depth, &proposal, public_keys.clone(), internal_leader_divider, &ip, &private_keys));
         }
 
         // Set up validator connections.
-        let mut first_internal_aggregator = FirstInternalAggregator::new(m, additional_depth, &proposal, public_keys.clone(), &ip);
+        let mut first_internal_aggregator = FirstInternalAggregator::new(m, additional_depth, &proposal, public_keys.clone(), &ip, &private_keys);
         first_internal_aggregator.open_connections().await;
         for mut dep_based in depth_based_internal_aggregator_vec.iter_mut() {
             dep_based.open_connections().await;
@@ -103,36 +105,33 @@ pub(crate) async fn main() {
         let mut leaf_node = LeafNode::new(m, &proposal, public_keys.clone(), my_sig, agg_sig, &ip);
         leaf_node.connect().await;
 
-        let mut network = 200;
-
-        let mut leaf_aggregator = LeafAggregator::new(m, &proposal, public_keys.clone(), &ip);
+        let mut leaf_aggregator = LeafAggregator::new(m, &proposal, public_keys.clone(), &ip, &private_keys);
 
         leaf_aggregator.connect().await;
-
-        // 200ms network
-        network += 200;
 
         first_internal_aggregator.connect().await;
         for mut dep_based in depth_based_internal_aggregator_vec.iter_mut() {
             dep_based.connect().await;
-
-            // 200ms network
-            network += 200;
         }
 
         // Send out network messages of simulator for the validator to process.
         simulator.run().await;
         println!("Started up Simulator");
+        let mut network = 0;
 
         // Actually run the validator and measure time it took.
         let time_now = Instant::now();
         leaf_node.run().await;
+        network += 200;
         println!("Now 1: {}", time_now.elapsed().as_millis());
         leaf_aggregator.run().await;
+        network += 200;
         println!("Now 2: {}", time_now.elapsed().as_millis());
         first_internal_aggregator.run().await;
+        network += 200;
         println!("Now 3: {}", time_now.elapsed().as_millis());
         for mut dep_based in depth_based_internal_aggregator_vec.iter_mut() {
+            network += 200;
             dep_based.run().await;
             println!("Now 4x: {}", time_now.elapsed().as_millis());
         }
@@ -153,9 +152,7 @@ pub(crate) async fn main() {
 
         //todo: Simulate average case
         //todo: Make it work in docker with netem - actually 200ms
-
-        //todo: Optional: On highest level we might want to have signatures and not Macs. As verify cost < agg pub cost.
-
+        
         // Do group by group. Try to find the one that is correct. This is quite fast we can do at least "a few groups".
         // The leader can verify the rest and send it to the next leader to have them include it.
         // Next leader only accepts if threshold was not met in the previous block. Slighy overhead but at least we guarantee finality. Becomes then 4 slot finality.
