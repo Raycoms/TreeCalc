@@ -22,11 +22,12 @@ pub struct LeafNode {
     pub parent_channels: broadcast::Sender<Signature>,
     pub pub_cache: Vec<AggregatePublicKey>,
     pub ip: String,
+    pub participation_modifier: usize
 }
 
 impl LeafNode {
 
-    pub fn new(m: usize, proposal: &Vec<u8>, public_keys: Vec<Arc<PublicKey>>, my_sig: Signature, agg_sig: Signature, ip: &String) -> Self {
+    pub fn new(m: usize, proposal: &Vec<u8>, public_keys: Vec<Arc<PublicKey>>, my_sig: Signature, agg_sig: Signature, ip: &String, participation_modifier: usize) -> Self {
         let mut rng = rand::thread_rng();
         let mut ikm = [0u8; 32];
         rng.fill_bytes(&mut ikm);
@@ -40,6 +41,7 @@ impl LeafNode {
             parent_channels: Sender::new(2),
             pub_cache: Vec::new(),
             ip: ip.clone(),
+            participation_modifier
         }
     }
 
@@ -67,20 +69,17 @@ impl LeafNode {
     pub async fn run(&mut self) {
         println!("Starting up Leaf node");
 
-        self.verify().await;
-        self.verify().await;
+        self.verify(self.participation_modifier).await;
+        self.verify(self.participation_modifier).await;
 
         self.parent_channels.send(self.my_sig.clone()).unwrap();
         println!("Awaiting sending proposal");
         self.parent_channels.closed().await;
     }
 
-    pub async fn verify(&mut self) {
+    pub async fn verify(&mut self, participation_modifier: usize) {
         let mut handles = Vec::new();
-
-        // Participation modifier for cost calculation. It's 6 for 2/3 participation and 20 for 9/10
-        let participation_modifier = 6;
-
+        
         for i in 0..4 {
             let share = self.public_keys.len()/4;
             let mut pubs_cache_copy = self.pub_cache.get(i).unwrap().clone();

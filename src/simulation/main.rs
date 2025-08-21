@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 
+use std::env;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use get_if_addrs::get_if_addrs;
@@ -21,8 +22,15 @@ pub type HmacSha256 = Hmac<Sha256>;
 
 // Thread pool 1: 4 threads
 pub(crate) static RUN_POOL: Lazy<Runtime> = Lazy::new(|| {
+
+    let args: Vec<String> = env::args().collect();
+    let mut core_count = 4;
+    if args.len() > 2 {
+        core_count = args[2].parse::<usize>().unwrap();
+    }
+
     Builder::new_multi_thread()
-        .worker_threads(4)
+        .worker_threads(core_count)
         .thread_name("run")
         .enable_all()
         .build()
@@ -39,8 +47,10 @@ pub(crate) static PREPARE_POOL: Lazy<Runtime> = Lazy::new(|| {
         .unwrap()
 });
 
-
+/// We want to run this with m = 320/256, Cores = 4,6,8,12,16 (need 20 core machine) So parameters is cargo run -- 320/256 4/16
 pub(crate) async fn main() {
+
+    let args: Vec<String> = env::args().collect();
 
     let mut ip: String = "127.0.0.1".parse().unwrap();
     for iface in get_if_addrs().unwrap() {
@@ -54,20 +64,20 @@ pub(crate) async fn main() {
 
     println!("Starting simulation {}", ip);
 
-    // 2560000 (2.5m) Leaf nodes
-    // 320 fanout
-    // 8000 Leaf Aggregator Groups
-    // 400 Internal Aggregator Groups
-    // 20 Internal Aggregator Groups
-    // 1 Leader
-
-    // Multiple Worst Cases
-    // -> Worst case 1/3 faulty
-    // -> Worst case, bad group distributions under the 1/3 and last one we check
-    // -----> In the presence of 1/3, on average.
-
     // Fanout we're considering.
-    let m = 256;
+    let mut m = 256;
+
+    if args.len() > 1 {
+        m = args[0].parse::<usize>().unwrap();
+    }
+
+    // Participation modifier for cost calculation. It's 2x3 (3 for 1/3) for 2/3 participation and 2*10 for 9/10, and 2*100 for 99/100
+    let mut participation_modifier = 6;
+
+    if args.len() > 3 {
+        participation_modifier = args[3].parse::<usize>().unwrap();
+    }
+
     let additional_depth = 2;
     let leader_divider = 1;
 
@@ -92,7 +102,7 @@ pub(crate) async fn main() {
             if i == 0 {
                 internal_leader_divider = leader_divider;
             }
-            depth_based_internal_aggregator_vec.push(DepthBasedInternalAggregator::new(m, i, additional_depth, &proposal, public_keys.clone(), internal_leader_divider, &ip, &private_keys));
+            depth_based_internal_aggregator_vec.push(DepthBasedInternalAggregator::new(m, i, additional_depth, &proposal, public_keys.clone(), internal_leader_divider, &ip, &private_keys, participation_modifier));
         }
 
         // Set up validator connections.
@@ -102,7 +112,7 @@ pub(crate) async fn main() {
             dep_based.open_connections().await;
         }
 
-        let mut leaf_node = LeafNode::new(m, &proposal, public_keys.clone(), my_sig, agg_sig, &ip);
+        let mut leaf_node = LeafNode::new(m, &proposal, public_keys.clone(), my_sig, agg_sig, &ip, participation_modifier);
         leaf_node.connect().await;
 
         let mut leaf_aggregator = LeafAggregator::new(m, &proposal, public_keys.clone(), &ip, &private_keys);
@@ -152,13 +162,6 @@ pub(crate) async fn main() {
 
         //todo: Simulate average case
         //todo: Make it work in docker with netem - actually 200ms
-        
-        // Do group by group. Try to find the one that is correct. This is quite fast we can do at least "a few groups".
-        // The leader can verify the rest and send it to the next leader to have them include it.
-        // Next leader only accepts if threshold was not met in the previous block. Slighy overhead but at least we guarantee finality. Becomes then 4 slot finality.
-        // Proof of misbehaviour was sent around as well, so people were slashed for doing this.
-
-        // If we only have to do once the public key agg, we're better off. But in the worst case? ugh?
 
         // Give the program time to wrap up.
         sleep(Duration::from_secs(5));
@@ -172,5 +175,5 @@ pub(crate) async fn main() {
     }
 
     let result = final_time/10;
-    println!("Result final: {}", result);
+    println!("Result final: {} for {:?}", result, env::args());
 }

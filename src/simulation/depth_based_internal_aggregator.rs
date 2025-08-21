@@ -36,7 +36,8 @@ pub struct DepthBasedInternalAggregator {
     // Channel to hand signatures that come from the children and process them.
     pub signature_receiver: Receiver<(usize, BitVec, Signature, PublicKey, BitVec, Signature, PublicKey)>,
     pub ip : String,
-    pub private_key: Arc<SecretKey>
+    pub private_key: Arc<SecretKey>,
+    pub participation_modifier: usize,
 }
 
 impl Default for DepthBasedInternalAggregator {
@@ -52,14 +53,15 @@ impl Default for DepthBasedInternalAggregator {
             public_keys: Arc::new(Vec::new()),
             signature_receiver: async_channel::unbounded().1,
             ip: "127.0.0.1".to_string(),
-            private_key: Arc::new(SecretKey::default())
+            private_key: Arc::new(SecretKey::default()),
+            participation_modifier: 6
         }
     }
 }
 
 impl DepthBasedInternalAggregator {
 
-    pub fn new(m: usize, depth: usize, total_depth: usize, proposal: &Vec<u8>, public_keys: Vec<Arc<PublicKey>>, leader_divider: usize, ip: &String, private_keys: &Vec<Arc<SecretKey>>) -> Self {
+    pub fn new(m: usize, depth: usize, total_depth: usize, proposal: &Vec<u8>, public_keys: Vec<Arc<PublicKey>>, leader_divider: usize, ip: &String, private_keys: &Vec<Arc<SecretKey>>, participation_modifier: usize) -> Self {
         DepthBasedInternalAggregator {
             depth,
             m,
@@ -69,6 +71,7 @@ impl DepthBasedInternalAggregator {
             public_keys: Arc::new(public_keys),
             ip: ip.clone(),
             private_key: private_keys.get(0).unwrap().clone(),
+            participation_modifier,
             ..Default::default()
         }
     }
@@ -80,7 +83,7 @@ impl DepthBasedInternalAggregator {
 
         let expected_sigs = (self.m / 16).pow((self.total_depth - self.depth) as u32) * self.m;
         println!("Expected sigs: {} at {} at {}", expected_sigs, self.depth, base_port);
-        connect_to_child_nodes(self.ip.clone(), self.m, base_port, &self.proposal, &self.public_keys, &mut self.child_channels, signature_sender, expected_sigs).await;
+        connect_to_child_nodes(self.ip.clone(), self.m, base_port, &self.proposal, &self.public_keys, &mut self.child_channels, signature_sender, expected_sigs, self.participation_modifier).await;
         self.signature_receiver=signature_receiver;
 
         println!("Finished preparing internal aggregator connections");
@@ -224,7 +227,7 @@ impl DepthBasedInternalAggregator {
 }
 
 // connect to m child nodes. So we assume they're al
-pub async fn connect_to_child_nodes(ip: String, m: usize, base_port: usize, proposal: &Arc<Vec<byte>>, public_keys: &Arc<Vec<Arc<PublicKey>>>, sender: &broadcast::Sender<()>, signature_sender: Sender<(usize, BitVec, Signature, PublicKey, BitVec, Signature, PublicKey)>, expected_sigs: usize) {
+pub async fn connect_to_child_nodes(ip: String, m: usize, base_port: usize, proposal: &Arc<Vec<byte>>, public_keys: &Arc<Vec<Arc<PublicKey>>>, sender: &broadcast::Sender<()>, signature_sender: Sender<(usize, BitVec, Signature, PublicKey, BitVec, Signature, PublicKey)>, expected_sigs: usize, participation_modifier: usize) {
 
     println!("Opening Port: {}", base_port);
 
@@ -242,7 +245,7 @@ pub async fn connect_to_child_nodes(ip: String, m: usize, base_port: usize, prop
 
     let expected_sigs_copy : usize = expected_sigs.clone();
     let m_copy = m.clone();
-
+    let participation_modifier = participation_modifier.clone();
     RUN_POOL.spawn(async move {
         for _ in 0..m_copy {
             let mut rx = local_sender.subscribe();
@@ -252,6 +255,7 @@ pub async fn connect_to_child_nodes(ip: String, m: usize, base_port: usize, prop
             let local_proposal_copy = proposal_copy.clone();
             let local_expected_sigs = expected_sigs_copy.clone();
             let map = map.clone();
+            let participation_modifier = participation_modifier.clone();
             match listener.accept().await {
                 Ok((mut socket, address)) => {
 
@@ -331,9 +335,6 @@ pub async fn connect_to_child_nodes(ip: String, m: usize, base_port: usize, prop
                                 let pub_key = AggregatePublicKey::aggregate(&pubs, false).unwrap();
                                 map.insert(group_id, pub_key);
                             }
-
-                            // Participation modifier for cost calculation. It's 6 for 2/3 participation and 20 for 9/10
-                            let participation_modifier = 6;
 
                             let mut agg_pub = map.get(&group_id).unwrap().clone();
 
