@@ -11,7 +11,7 @@ for x in $configurations; do
     for y in $cores; do
         for z in $participationrate; do
             echo "Running Configuration: $x Cores: $y Participation Rate $z"
-            exec /usr/local/bin/tree $x $y $z | grep "final"
+            exec /usr/local/bin/tree "$x" "$y" "$z" | grep "final"
         done
     done
 done
