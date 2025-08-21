@@ -68,7 +68,7 @@ pub(crate) async fn main() {
     let mut m = 256;
 
     if args.len() > 1 {
-        m = args[0].parse::<usize>().unwrap();
+        m = args[1].parse::<usize>().unwrap();
     }
 
     // Participation modifier for cost calculation. It's 2x3 (3 for 1/3) for 2/3 participation and 2*10 for 9/10, and 2*100 for 99/100
